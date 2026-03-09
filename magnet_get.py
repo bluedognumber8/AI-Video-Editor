@@ -1,9 +1,9 @@
-import argparse
 import requests
 from bs4 import BeautifulSoup
 import urllib.parse
 import pickle
 import os
+import sys
 import subprocess
 import time
 import urllib.request
@@ -14,27 +14,40 @@ import json
 # ⚙️ НАСТРОЙКИ (КОНФИГУРАЦИЯ)
 # =====================================================================
 CONFIG = {
+    # 1. Настройки RuTracker
     "rutracker": {
         "username": "mkiisklaa",
         "password": "'ffaCt!$M972sQU",
         "cookie_file": "rutracker_cookies.pkl"
     },
+    
+    # 2. Логика поиска
     "search": {
+        # Приоритет источников. Если "youtube" не найдет видео нужной длины, включится "torrent"
         "priority": ["youtube", "torrent"], 
-        "min_seeds": 5,              
-        "max_size_gb": 25.0           
+        "min_seeds": 10,              # Минимальное кол-во сидов для торрента
+        "max_size_gb": 25.0           # Максимальный размер (ГБ) для комфортного стриминга
     },
+
+    # 3. Система баллов для выбора лучшего торрента (Скоринг)
     "scoring": {
         "res_1080p": 1000,
         "res_720p": 300,
         "source_bdrip_bluray": 500,
         "source_web": 400,
-        "penalty_4k": -2000,          
-        "penalty_huge_size": -1500    
+        "penalty_4k": -2000,          # Штраф за 4K (слишком тяжело стримить)
+        "penalty_huge_size": -1500    # Штраф за размер больше max_size_gb
     },
+
+    # 4. Настройки по умолчанию для клипа
     "clip": {
-        "output_folder": "clips"      
+        "default_query": "Connor's Wedding",
+        "default_start": "00:36:00",
+        "default_duration": 10,       # в секундах
+        "output_folder": "clips"      # Папка для сохранения видео
     },
+
+    # 5. Трекеры-помощники (для быстрого старта магнет-ссылок)
     "trackers": [
         "udp://tracker.opentrackr.org:1337/announce",
         "udp://open.demonii.com:1337/announce",
@@ -47,10 +60,12 @@ CONFIG = {
 # =====================================================================
 
 def time_to_seconds(time_str):
+    """Конвертирует 'HH:MM:SS' в секунды"""
     h, m, s = map(int, time_str.split(':'))
     return h * 3600 + m * 60 + s
 
 def seconds_to_time(seconds):
+    """Конвертирует секунды в 'HH:MM:SS'"""
     return f"{int(seconds)//3600:02}:{int((seconds)%3600)//60:02}:{int(seconds)%60:02}"
 
 def get_free_port():
@@ -62,29 +77,22 @@ def ensure_dir(path):
     if not os.path.exists(path):
         os.makedirs(path)
 
-def generate_search_queries(title, m_type, season, episode):
-    """Умная генерация поисковых фраз (Особенно важно для сериалов)"""
-    if m_type == 'movie' or int(season) == 0:
-        return [title, f"{title} полный фильм"]
-    
-    s_num, e_num = int(season), int(episode)
-    return [
-        f"{title} S{s_num:02d}E{e_num:02d}",      # Priority 1: Web-DL/релизы по сериям
-        f"{title} {s_num} сезон {e_num} серия",  # Priority 2: Русское название серии
-        f"{title} сезон {s_num}",                # Priority 3: Весь сезон целиком
-    ]
-
 # =====================================================================
-# 🔴 МОДУЛЬ YOUTUBE
+# 🔴 МОДУЛЬ YOUTUBE (ПРИОРИТЕТ 1)
 # =====================================================================
 
 def try_youtube(query, start_time, duration_secs, output_path):
-    print(f"🔴 [YOUTUBE] Ищем: '{query}'...")
+    print(f"\n🔴 [YOUTUBE] Ищем: '{query}'...")
+    
     start_sec = time_to_seconds(start_time)
     required_min_duration = start_sec + duration_secs
 
+    # 1. Получаем список из 5 лучших результатов (только метаданные, без скачивания)
     search_cmd = [
-        "yt-dlp", f"ytsearch5:{query} полный фильм", "--dump-json", "--no-warnings"
+        "yt-dlp",
+        f"ytsearch5:{query} полный фильм",
+        "--dump-json",
+        "--no-warnings"
     ]
     
     try:
@@ -94,36 +102,45 @@ def try_youtube(query, start_time, duration_secs, output_path):
         print(f"⚠️ ОШИБКА поиска YouTube: {e}")
         return False
 
-    best_video_id, best_video_title = None, None
+    best_video_id = None
+    best_video_title = None
+
+    # 2. Ищем видео, которое длиннее, чем наш start_time (чтобы не схватить короткий трейлер)
     for v in videos:
         v_duration = v.get("duration", 0)
         if v_duration > required_min_duration:
             best_video_id = v.get("id")
             best_video_title = v.get("title")
-            print(f"✅ Найдено видео: {best_video_title[:60]}... ({v_duration//60} мин)")
+            print(f"✅ Найдено подходящее видео: {best_video_title[:60]}... ({v_duration//60} мин)")
             break
 
     if not best_video_id:
-        print("❌ На YouTube нет видео нужной длины.")
+        print(f"❌ Подходящих полных фильмов на YouTube не найдено (все короче {start_time}).")
         return False
 
+    # 3. Скачиваем только нужный фрагмент
     end_time = seconds_to_time(required_min_duration)
-    print(f"🚀 Вырезаем фрагмент прямо с серверов YouTube...")
+    section_arg = f"*{start_time}-{end_time}"
+    
+    print(f"🚀 Вырезаем фрагмент {start_time} - {end_time} прямо с серверов YouTube...")
     
     download_cmd = [
         "yt-dlp",
-        "--download-sections", f"*{start_time}-{end_time}",
+        "--download-sections", section_arg,
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--force-keyframes-at-cuts",
         "-o", output_path,
         f"https://www.youtube.com/watch?v={best_video_id}"
     ]
+    
     dl_result = subprocess.run(download_cmd)
     
-    return dl_result.returncode == 0 and os.path.exists(output_path)
+    if dl_result.returncode == 0 and os.path.exists(output_path):
+        return True
+    return False
 
 # =====================================================================
-# 🔵 МОДУЛЬ TORRENT / RUTRACKER
+# 🔵 МОДУЛЬ TORRENT / RUTRACKER (ПРИОРИТЕТ 2)
 # =====================================================================
 
 def evaluate_torrent(title, seeds, size_gb):
@@ -133,8 +150,10 @@ def evaluate_torrent(title, seeds, size_gb):
     
     if "1080p" in title_lower: score += sc["res_1080p"]
     elif "720p" in title_lower: score += sc["res_720p"]
+    
     if "bdrip" in title_lower or "blu-ray" in title_lower: score += sc["source_bdrip_bluray"]
     elif "web-dl" in title_lower or "webrip" in title_lower: score += sc["source_web"]
+        
     if "4k" in title_lower or "2160p" in title_lower: score += sc["penalty_4k"]
     if size_gb > CONFIG["search"]["max_size_gb"]: score += sc["penalty_huge_size"]
 
@@ -142,7 +161,7 @@ def evaluate_torrent(title, seeds, size_gb):
 
 def get_magnet(query):
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"})
     c_file = CONFIG["rutracker"]["cookie_file"]
 
     if os.path.exists(c_file):
@@ -157,8 +176,7 @@ def get_magnet(query):
         except: pass
 
     if not active_domain:
-        print("❌ Не удалось подключиться к RuTracker.")
-        return None
+        print("❌ Не удалось подключиться к RuTracker."); return None
 
     if not is_logged_in:
         print("🔐 Входим в аккаунт...")
@@ -182,7 +200,7 @@ def get_magnet(query):
         if title_tag:
             title = title_tag.text.strip()
             try: seeds = int(seed_tag.text.strip()) if seed_tag else 0
-            except: seeds = 0
+            except ValueError: seeds = 0
             
             size_gb = 0
             if size_tag and size_tag.has_attr('data-ts_text'):
@@ -194,12 +212,16 @@ def get_magnet(query):
                 valid_torrents.append({"title": title, "href": title_tag.get('href'), "seeds": seeds, "size_gb": size_gb, "score": score})
 
     if not valid_torrents:
-        print(f"❌ Нет раздач (или сидов меньше {CONFIG['search']['min_seeds']}).")
-        return None
+        print(f"❌ Нет раздач с количеством сидов >= {CONFIG['search']['min_seeds']}."); return None
 
     valid_torrents.sort(key=lambda x: x['score'], reverse=True)
+    
+    print("\n🏆 Топ-3 найденных раздач по рейтингу качества:")
+    for i, t in enumerate(valid_torrents[:3], 1):
+        print(f"{i}. [Баллы: {t['score']}] Сиды: {t['seeds']} | Размер: {t['size_gb']:.1f} ГБ | {t['title'][:60]}...")
+
     best = valid_torrents[0]
-    print(f"✅ ВЫБРАН ТОРРЕНТ: {best['title'][:60]}... (Сидов: {best['seeds']})")
+    print(f"\n✅ ВЫБРАН: {best['title'][:60]}...")
 
     topic_resp = session.get(f"https://{active_domain}/forum/{best['href']}", timeout=15).content.decode('windows-1251')
     magnet_tag = BeautifulSoup(topic_resp, 'html.parser').select_one("a.magnet-link")
@@ -211,7 +233,7 @@ def get_magnet(query):
     return magnet
 
 def try_torrent(query, start_time, duration_secs, output_path):
-    print(f"🔵 [TORRENT] Ищем: '{query}' на RuTracker...")
+    print(f"\n🔵 [TORRENT] Ищем: '{query}' на RuTracker...")
     
     magnet = get_magnet(query)
     if not magnet: return False
@@ -219,26 +241,26 @@ def try_torrent(query, start_time, duration_secs, output_path):
     port = get_free_port()
     stream_url = f"http://127.0.0.1:{port}/"
     
-    print("🚀 Запускаем Peerflix (Ожидание пиров до 90 сек)...")
+    print("\n🚀 Запускаем торрент-движок (Peerflix)...")
     log_file = open("peerflix_debug.log", "w", encoding="utf-8")
     peerflix = subprocess.Popen(["peerflix", magnet, "--port", str(port)], stdout=log_file, stderr=subprocess.STDOUT)
     
+    print("⏳ Соединяемся с пирами (до 90 сек)...")
     server_ready = False
+    
     try:
         for _ in range(90):
             if peerflix.poll() is not None:
-                print("❌ Peerflix упал. Смотри лог.")
-                return False
+                print(f"❌ Peerflix упал. Смотри peerflix_debug.log"); return False
             try:
                 urllib.request.urlopen(urllib.request.Request(stream_url, method='HEAD'), timeout=2)
                 server_ready = True; break
             except: time.sleep(1)
                 
         if not server_ready:
-            print("❌ Торрент не ответил (возможно нет сидов/пиров).")
-            return False
+            print("❌ Торрент не ответил (возможно нет пиров)."); return False
 
-        print("✅ Буферизация пошла! Вырезаем фрагмент через FFmpeg...")
+        print("\n✅ Начинаем буферизацию (FFmpeg)...")
         time.sleep(3) 
         
         duration_str = seconds_to_time(duration_secs)
@@ -247,6 +269,7 @@ def try_torrent(query, start_time, duration_secs, output_path):
             "-ss", start_time, "-i", stream_url, "-t", duration_str,
             "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-y", output_path
         ]
+
         result = subprocess.run(ffmpeg_cmd)
         return result.returncode == 0
 
@@ -257,50 +280,39 @@ def try_torrent(query, start_time, duration_secs, output_path):
         if not log_file.closed: log_file.close()
 
 # =====================================================================
-# 🚀 ГЛАВНЫЙ БЛОК УПРАВЛЕНИЯ
+# 🚀 ГЛАВНЫЙ КОНТРОЛЛЕР
 # =====================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Скачивание и обрезка видео")
-    parser.add_argument("--title", required=True, help="Название фильма/сериала")
-    parser.add_argument("--type", default="movie", help="Тип: movie или tv")
-    parser.add_argument("--season", default="0", help="Номер сезона")
-    parser.add_argument("--episode", default="0", help="Номер серии")
-    parser.add_argument("--start", required=True, help="Таймкод (HH:MM:SS)")
-    parser.add_argument("--duration", required=True, type=int, help="Длительность (сек)")
-    args = parser.parse_args()
-
-    ensure_dir(CONFIG["clip"]["output_folder"])
+    query = sys.argv[1] if len(sys.argv) > 1 else CONFIG["clip"]["default_query"]
+    start_time = CONFIG["clip"]["default_start"]
+    duration = CONFIG["clip"]["default_duration"]
     
-    # Красивое имя файла
-    if args.type == 'tv' and int(args.season) > 0:
-        safe_name = f"{args.title}_S{int(args.season):02d}E{int(args.episode):02d}"
-    else:
-        safe_name = args.title
-        
-    safe_name = "".join(c for c in safe_name if c.isalnum() or c in " _-").strip().replace(" ", "_")
+    ensure_dir(CONFIG["clip"]["output_folder"])
+    safe_name = "".join(c for c in query if c.isalnum() or c in " _-").strip().replace(" ", "_")
     output_file = os.path.join(CONFIG["clip"]["output_folder"], f"{safe_name}_clip.mp4")
 
-    print(f"🎬 ЗАПРОС: {args.title} | Таймкод: {args.start} | Длина: {args.duration}s")
+    print("="*60)
+    print(f"🎬 ЗАДАЧА: Найти '{query}', вырезать {duration} сек начиная с {start_time}")
+    print("="*60)
 
-    queries = generate_search_queries(args.title, args.type, args.season, args.episode)
     success = False
 
+    # Умный перебор приоритетов из конфига
     for source in CONFIG["search"]["priority"]:
-        print(f"\n🔄 ИСТОЧНИК: [{source.upper()}]")
-        for query in queries:
-            if source == "youtube":
-                success = try_youtube(query, args.start, args.duration, output_file)
-            elif source == "torrent":
-                success = try_torrent(query, args.start, args.duration, output_file)
-            
-            if success: break
-        if success: break
+        if source == "youtube":
+            success = try_youtube(query, start_time, duration, output_file)
+        elif source == "torrent":
+            success = try_torrent(query, start_time, duration, output_file)
+        
+        if success:
+            print(f"\n🎉 ГОТОВО! Видео сохранено: {os.path.abspath(output_file)}\n")
+            break
+        else:
+            print(f"⚠️ Источник [{source}] не справился. Переход к следующему...\n")
 
-    if success:
-        print(f"\n🎉 ГОТОВО! Видео сохранено: {os.path.abspath(output_file)}\n")
-    else:
-        print("\n❌ ОШИБКА: Видео не найдено или не удалось скачать.\n")
+    if not success:
+        print("❌ ОШИБКА: Ни один из источников не смог скачать и обрезать видео.")
 
 if __name__ == "__main__":
     main()
