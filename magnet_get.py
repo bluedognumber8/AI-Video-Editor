@@ -41,9 +41,9 @@ CONFIG = {
 
     # 4. Настройки по умолчанию для клипа
     "clip": {
-        "default_query": "Connor's Wedding",
-        "default_start": "00:36:00",
-        "default_duration": 10,       # в секундах
+        "default_query": "Терминатор 2 Судный день",
+        "default_start": "00:20:00",
+        "default_duration": 30,       # в секундах
         "output_folder": "clips"      # Папка для сохранения видео
     },
 
