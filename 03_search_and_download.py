@@ -7,8 +7,6 @@ import sys
 DB_NAME = 'movies_master.sqlite'
 
 def srt_to_seconds(srt_time_str):
-    """Превращает таймкод субтитров 00:45:10,000 в секунды"""
-    # Если вдруг таймкод пришел в формате с точкой вместо запятой
     srt_time_str = srt_time_str.replace('.', ',')
     time_part, ms_part = srt_time_str.split(',')
     h, m, s = map(int, time_part.split(':'))
@@ -16,15 +14,14 @@ def srt_to_seconds(srt_time_str):
     return h * 3600 + m * 60 + s + ms / 1000.0
 
 def seconds_to_hms(seconds):
-    """Превращает секунды обратно в 00:45:10"""
     return str(datetime.timedelta(seconds=int(seconds)))
 
-def search_jokes(keyword, limit=10):
+def search_jokes(keyword, limit=7, min_rating=0.0, target_type='all'):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # Добавляем * для поиска по началу слова/окончаниям
     search_query = f"{keyword}*"
+    params = [search_query]
     
     sql = '''
         SELECT 
@@ -35,18 +32,30 @@ def search_jokes(keyword, limit=10):
         WHERE s.id IN (
             SELECT rowid FROM subtitles_fts WHERE text MATCH ?
         )
+    '''
+    
+    if min_rating > 0:
+        sql += ' AND m.rating >= ?'
+        params.append(min_rating)
+        
+    if target_type in ['movie', 'tv']:
+        sql += ' AND m.type = ?'
+        params.append(target_type)
+        
+    sql += '''
         GROUP BY m.imdb_id, SUBSTR(s.start_time, 1, 5)
         ORDER BY m.rating DESC
         LIMIT ?
     '''
-    cursor.execute(sql, (search_query, limit))
+    params.append(limit)
+    
+    cursor.execute(sql, params)
     results = cursor.fetchall()
     conn.close()
     return results
 
-def download_clip(title, imdb_id, start_srt, end_srt, m_type, season, episode):
-    """Считает таймкоды и вызывает скрипт скачивания"""
-    # Добавляем запас времени (3 сек до и 3 сек после)
+# ДОБАВЛЕН АРГУМЕНТ year
+def download_clip(title, year, imdb_id, start_srt, end_srt, m_type, season, episode, source_pref):
     start_sec = max(0, srt_to_seconds(start_srt) - 3)
     end_sec = srt_to_seconds(end_srt) + 3
     duration = end_sec - start_sec
@@ -56,35 +65,44 @@ def download_clip(title, imdb_id, start_srt, end_srt, m_type, season, episode):
     print("🎬 ПЕРЕДАЮ ЗАДАЧУ ДВИЖКУ СКАЧИВАНИЯ 🎬")
     print("="*60)
     
-    # Используем sys.executable, чтобы всегда вызывать правильную версию Python (ту же, где запущен скрипт)
     command = [
         sys.executable, "magnet_get.py",
         "--title", title,
+        "--year", str(year), # ПЕРЕДАЕМ ГОД В КАЧАЛКУ
         "--type", str(m_type),
         "--season", str(season),
         "--episode", str(episode),
         "--start", start_hms,
-        "--duration", str(int(duration))
+        "--duration", str(int(duration)),
+        "--source", source_pref
     ]
     
-    # Запускаем magnet_get.py
     subprocess.run(command)
 
 def main():
     print("="*60)
-    print(" 🤖 AI-РЕЖИССЕР МОНТАЖА (Мастер-Скрипт v2.0) ")
+    print(" 🤖 AI-РЕЖИССЕР МОНТАЖА (v2.3 Точный поиск) ")
     print("="*60)
     
     while True:
-        word = input("\nВведите фразу/слово для поиска мема (или 'q' для выхода): ").strip()
+        word = input("\n📝 Введите слово/фразу (или 'q' для выхода): ").strip()
         if word.lower() == 'q': break
         if not word: continue
             
-        print("🔍 Ищу в локальной базе...\n")
-        results = search_jokes(word, limit=7)
+        print("\n⚙️  НАСТРОЙКИ ПОИСКА (Нажмите Enter, чтобы пропустить):")
+        rating_input = input("   ⭐️ Мин. рейтинг (например, 7.5): ").strip()
+        min_r = float(rating_input) if rating_input.replace('.', '', 1).isdigit() else 0.0
+        
+        type_input = input("   🎞  Где ищем? (1 - Фильмы, 2 - Сериалы, Enter - Везде): ").strip()
+        t_type = 'all'
+        if type_input == '1': t_type = 'movie'
+        elif type_input == '2': t_type = 'tv'
+            
+        print("\n🔍 Ищу в локальной базе...\n")
+        results = search_jokes(word, limit=7, min_rating=min_r, target_type=t_type)
         
         if not results:
-            print("❌ Ничего не найдено.")
+            print("❌ По вашим фильтрам ничего не найдено. Попробуйте смягчить условия.")
             continue
             
         for i, row in enumerate(results, 1):
@@ -105,14 +123,19 @@ def main():
         if choice.isdigit() and 1 <= int(choice) <= len(results):
             selected = results[int(choice)-1]
             
+            src_input = input("Где искать видео? (1 - Везде (сначала YouTube), 2 - ТОЛЬКО Торрент): ").strip()
+            pref = "torrent" if src_input == "2" else "all"
+            
             download_clip(
                 title=selected[0], 
+                year=selected[1], # БЕРЕМ ГОД ИЗ ВЫБРАННОГО РЕЗУЛЬТАТА
                 imdb_id=selected[10], 
                 start_srt=selected[7], 
                 end_srt=selected[8],
                 m_type=selected[4],
                 season=selected[5],
-                episode=selected[6]
+                episode=selected[6],
+                source_pref=pref
             )
 
 if __name__ == '__main__':
