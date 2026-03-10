@@ -10,12 +10,8 @@ import time
 import urllib.request
 import socket
 import json
-import bencode 
-from tqdm import tqdm
+import bencode
 
-# =====================================================================
-# ⚙️ НАСТРОЙКИ (КОНФИГУРАЦИЯ)
-# =====================================================================
 CONFIG = {
     "rutracker": {
         "username": "mkiisklaa",
@@ -23,14 +19,12 @@ CONFIG = {
         "cookie_file": "rutracker_cookies.pkl"
     },
     "search": {
-        "priority": ["youtube", "torrent"], 
+        "priority": ["torrent", "youtube"], 
         "min_seeds": 5,              
-        "max_size_gb": 25.0           
+        "max_size_gb": 35.0           
     },
     "scoring": {
-        "res_1080p": 1000,
-        "res_720p": 300,
-        "source_web": 400,
+        "res_1080p": 1000, "res_720p": 300, "source_web": 400,
     },
     "clip": {
         "output_folder": "clips"      
@@ -43,11 +37,11 @@ CONFIG = {
 }
 
 def time_to_seconds(time_str):
-    h, m, s = map(int, time_str.split(':'))
-    return h * 3600 + m * 60 + s
+    h, m, s = map(float, time_str.split(':'))
+    return int(h * 3600 + m * 60 + s)
 
 def seconds_to_time(seconds):
-    return f"{int(seconds)//3600:02}:{int((seconds)%3600)//60:02}:{int(seconds)%60:02}"
+    return f"{int(seconds)//3600:02}:{int(seconds)%3600//60:02}:{int(seconds)%60:02}"
 
 def get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -57,44 +51,22 @@ def get_free_port():
 def ensure_dir(path):
     if not os.path.exists(path): os.makedirs(path)
 
-# --- ГЕНЕРАТОР УМНЫХ ЗАПРОСОВ ---
 def generate_search_queries(title_ru, title_orig, year, m_type, season, episode):
-    """
-    Генерирует список запросов с фоллбэками. 
-    Если первый не найдет торрент, скрипт попробует второй.
-    """
     queries = []
     y = int(year)
-    
     if m_type == 'movie' or int(season) == 0:
-        # 1. Приоритет: Русское название + Год
         if y > 0: queries.append(f"{title_ru} {y}")
-        
-        # 2. Фоллбэк: Оригинальное название + Год
         if title_orig and title_orig.lower() != title_ru.lower():
             if y > 0: queries.append(f"{title_orig} {y}")
-            
-        # 3. Фоллбэк: Просто русское название (без года, если год указан криво)
         queries.append(title_ru)
-        
     else:
-        # ДЛЯ СЕРИАЛОВ
         s_num, e_num = int(season), int(episode)
-        
-        # 1. Русское название + сезон
         queries.append(f"{title_ru} {s_num} сезон")
-        
-        # 2. Оригинальное название + сезон (часто так релизят Web-DL)
         if title_orig and title_orig.lower() != title_ru.lower():
             queries.append(f"{title_orig} S{s_num:02d}")
-            
-        # 3. Точный поиск серии
         queries.append(f"{title_ru} S{s_num:02d}E{e_num:02d}")
-        
-    # Убираем дубликаты, сохраняя порядок
     seen = set()
     return [q for q in queries if not (q in seen or seen.add(q))]
-# --------------------------------
 
 def get_bencode_val(d, key):
     if isinstance(key, str):
@@ -105,61 +77,116 @@ def get_bencode_val(d, key):
 
 def find_episode_index(torrent_path, target_episode):
     try:
-        with open(torrent_path, 'rb') as f:
-            meta = bencode.decode(f.read())
+        with open(torrent_path, 'rb') as f: meta = bencode.decode(f.read())
         info = get_bencode_val(meta, 'info')
         if not info: return 0
         files = get_bencode_val(info, 'files')
         if not files: return 0
-        
         video_files = []
         for idx, f_dict in enumerate(files):
             path_list = get_bencode_val(f_dict, 'path')
             if not path_list: continue
-            
             full_name = "/".join(p.decode('utf-8', 'ignore') if isinstance(p, bytes) else p for p in path_list).lower()
-            if full_name.endswith(('.mkv', '.mp4', '.avi')):
-                video_files.append((idx, full_name))
-        
+            if full_name.endswith(('.mkv', '.mp4', '.avi')): video_files.append((idx, full_name))
         video_files.sort(key=lambda x: x[1])
-        if 0 < target_episode <= len(video_files):
-            return video_files[target_episode - 1][0]
-        else:
-            return video_files[0][0]
+        if 0 < target_episode <= len(video_files): return video_files[target_episode - 1][0]
+        else: return video_files[0][0]
     except: return 0
 
-# =====================================================================
-# 🔴 МОДУЛЬ YOUTUBE
-# =====================================================================
+def run_clean_ffmpeg(stream_url, start_time, duration_secs, output_path):
+    duration_str = seconds_to_time(duration_secs)
+    ffmpeg_cmd = [
+        "ffmpeg", "-y", "-v", "error", "-stats",
+        "-i", stream_url, "-ss", start_time, "-t", duration_str,
+        "-map", "0:v:0", "-map", "0:a:0?", "-sn",
+        "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", output_path
+    ]
+    print("   🚀 Режем видео... ", end="", flush=True)
+    try:
+        process = subprocess.run(ffmpeg_cmd, timeout=120, capture_output=True, text=True)
+        if process.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            print("Готово!")
+            return True
+        else:
+            print("Ошибка нарезки.")
+            return False
+    except subprocess.TimeoutExpired:
+        print("Таймаут (зависло).")
+        return False
+
+def do_youtube_download(video_id, start_time, duration_secs, output_path):
+    end_time = seconds_to_time(time_to_seconds(start_time) + duration_secs)
+    print("   🚀 Скачивание фрагмента с YouTube...")
+    download_cmd = [
+        "yt-dlp", "--quiet", "--progress", "--download-sections", f"*{start_time}-{end_time}",
+        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--force-keyframes-at-cuts", "-o", output_path, f"https://www.youtube.com/watch?v={video_id}"
+    ]
+    dl_result = subprocess.run(download_cmd)
+    if dl_result.returncode == 0 and os.path.exists(output_path):
+        print(f"###SOURCE_FOUND###:youtube:{video_id}")
+        return True
+    return False
+
 def try_youtube(query, start_time, duration_secs, output_path):
-    print(f"\n🔴 [YOUTUBE] Ищем: '{query}'...")
-    start_sec = time_to_seconds(start_time)
-    required_min_duration = start_sec + duration_secs
+    print(f"\n🔴 [YOUTUBE] Поиск: '{query}'")
+    required_min_duration = time_to_seconds(start_time) + duration_secs
     try:
         result = subprocess.run(["yt-dlp", f"ytsearch5:{query} полный фильм", "--dump-json", "--no-warnings"], capture_output=True, text=True, check=True)
         videos = [json.loads(line) for line in result.stdout.strip().split('\n') if line]
     except: return False
-
     best_video_id = None
     for v in videos:
         if v.get("duration", 0) > required_min_duration:
             best_video_id = v.get("id")
             break
     if not best_video_id: return False
+    return do_youtube_download(best_video_id, start_time, duration_secs, output_path)
 
-    end_time = seconds_to_time(required_min_duration)
-    print(f"🚀 Вырезаем фрагмент с YouTube...")
-    dl_result = subprocess.run([
-        "yt-dlp", "--quiet", "--progress", "--download-sections", f"*{start_time}-{end_time}",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--force-keyframes-at-cuts", "-o", output_path,
-        f"https://www.youtube.com/watch?v={best_video_id}"
-    ])
-    return dl_result.returncode == 0 and os.path.exists(output_path)
+def do_torrent_download(topic_id, start_time, duration_secs, output_path, target_episode, active_domain):
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
+    with open(CONFIG["rutracker"]["cookie_file"], 'rb') as f: session.cookies.update(pickle.load(f))
+    
+    torrent_path = f"temp_{topic_id}.torrent"
+    try:
+        with open(torrent_path, "wb") as f:
+            f.write(session.get(f"https://{active_domain}/forum/dl.php?t={topic_id}", timeout=10).content)
+    except: return False
 
-# =====================================================================
-# 🔵 МОДУЛЬ TORRENT 
-# =====================================================================
+    file_index = find_episode_index(torrent_path, target_episode) if target_episode > 0 else 0
+    port = get_free_port()
+    stream_url = f"http://127.0.0.1:{port}/"
+    
+    peerflix_cmd = ["peerflix", torrent_path, "--index", str(file_index), "--port", str(port), "--quiet"]
+    for tr in CONFIG["trackers"]: peerflix_cmd.extend(["--tracker", tr])
+    peerflix = subprocess.Popen(peerflix_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    print("   ⏳ Подключение к пирам... ", end="", flush=True)
+    server_ready = False
+    try:
+        for _ in range(40): 
+            if peerflix.poll() is not None: return False
+            try:
+                urllib.request.urlopen(urllib.request.Request(stream_url, method='HEAD'), timeout=2)
+                server_ready = True
+                print("Успех!")
+                break
+            except: time.sleep(1)
+                
+        if not server_ready: return False
+        time.sleep(3) 
+        
+        if run_clean_ffmpeg(stream_url, start_time, duration_secs, output_path):
+            print(f"###SOURCE_FOUND###:torrent:{topic_id}")
+            return True
+        return False
+    finally:
+        peerflix.terminate()
+        try: peerflix.wait(timeout=3)
+        except: peerflix.kill()
+        if os.path.exists(torrent_path): os.remove(torrent_path)
+
 def evaluate_torrent(title, seeds, size_gb, is_tv):
     title_lower = title.lower()
     bad_versions = ["director's cut", "directors cut", "режиссерская", "extended", "расширенная", "unrated", "uncut", "без цензуры", "special edition", "open matte"]
@@ -178,9 +205,10 @@ def evaluate_torrent(title, seeds, size_gb, is_tv):
     score -= int(size_gb * 10)
     return score
 
-def get_torrent_file_and_index(query, target_episode, is_tv):
+def try_torrent(query, start_time, duration_secs, output_path, target_episode, is_tv):
+    print(f"\n🔵 [TORRENT] Поиск: '{query}'")
     session = requests.Session()
-    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    session.headers.update({"User-Agent": "Mozilla/5.0"})
     c_file = CONFIG["rutracker"]["cookie_file"]
     if os.path.exists(c_file):
         with open(c_file, 'rb') as f: session.cookies.update(pickle.load(f))
@@ -191,11 +219,7 @@ def get_torrent_file_and_index(query, target_episode, is_tv):
             if session.get(f"https://{domain}/forum/privmsg.php?folder=inbox", timeout=5).status_code == 200:
                 active_domain = domain; break
         except: pass
-    if not active_domain: return None, 0
-
-    if not any(c.name == 'bb_session' for c in session.cookies):
-        session.post(f"https://{active_domain}/forum/login.php", data={"login_username": CONFIG["rutracker"]["username"], "login_password": CONFIG["rutracker"]["password"], "login": "Вход"}, timeout=15)
-        with open(c_file, 'wb') as f: pickle.dump(session.cookies, f)
+    if not active_domain: return False
 
     search_url = f"https://{active_domain}/forum/tracker.php?nm={urllib.parse.quote(query.encode('windows-1251'))}&o=10&s=2"
     soup = BeautifulSoup(session.get(search_url, timeout=15).content.decode('windows-1251'), 'html.parser')
@@ -203,13 +227,11 @@ def get_torrent_file_and_index(query, target_episode, is_tv):
 
     for row in soup.select("tr.hl-tr"):
         title_tag = row.select_one("a.tLink")
-        seed_tag, size_tag = row.select_one(".seedmed"), row.select_one(".tor-size")
-        
         if title_tag:
             title = title_tag.text.strip()
-            try: seeds = int(seed_tag.text.strip()) if seed_tag else 0
+            try: seeds = int(row.select_one(".seedmed").text.strip()) if row.select_one(".seedmed") else 0
             except: seeds = 0
-            try: size_gb = int(size_tag['data-ts_text']) / (1024**3) if size_tag else 0
+            try: size_gb = int(row.select_one(".tor-size")['data-ts_text']) / (1024**3) if row.select_one(".tor-size") else 0
             except: size_gb = 0
 
             if seeds >= CONFIG["search"]["min_seeds"]:
@@ -217,80 +239,20 @@ def get_torrent_file_and_index(query, target_episode, is_tv):
                 if score > 0: 
                     href = title_tag.get('href')
                     topic_id = href.split('t=')[1] if 't=' in href else None
-                    valid_torrents.append({"title": title, "topic_id": topic_id, "seeds": seeds, "size_gb": size_gb, "score": score})
+                    if topic_id: valid_torrents.append({"topic_id": topic_id, "score": score})
 
-    if not valid_torrents: return None, 0
-
+    if not valid_torrents: return False
     valid_torrents.sort(key=lambda x: x['score'], reverse=True)
-    best = valid_torrents[0]
-    print(f"   ✅ НАШЕЛ: {best['title'][:50]}... (Сиды: {best['seeds']})")
-
-    torrent_path = f"temp_{best['topic_id']}.torrent"
-    try:
-        with open(torrent_path, "wb") as f:
-            f.write(session.get(f"https://{active_domain}/forum/dl.php?t={best['topic_id']}", timeout=10).content)
-    except: return None, 0
-
-    file_index = find_episode_index(torrent_path, target_episode) if target_episode > 0 else 0
-    return torrent_path, file_index
-
-def try_torrent(query, start_time, duration_secs, output_path, target_episode, is_tv):
-    print(f"\n🔵 [TORRENT] Пробую запрос: '{query}'")
-    torrent_path, file_index = get_torrent_file_and_index(query, target_episode, is_tv)
     
-    if not torrent_path: 
-        print("   ❌ Ничего подходящего по этому запросу.")
-        return False
-    
-    port = get_free_port()
-    stream_url = f"http://127.0.0.1:{port}/"
-    
-    peerflix_cmd = ["peerflix", torrent_path, "--index", str(file_index), "--port", str(port)]
-    for tr in CONFIG["trackers"]: peerflix_cmd.extend(["--tracker", tr])
-        
-    peerflix = subprocess.Popen(peerflix_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    server_ready = False
-    try:
-        for _ in range(40): 
-            if peerflix.poll() is not None: return False
-            try:
-                urllib.request.urlopen(urllib.request.Request(stream_url, method='HEAD'), timeout=2)
-                server_ready = True; break
-            except: time.sleep(1)
-                
-        if not server_ready: return False
+    for t_info in valid_torrents[:3]:
+        if do_torrent_download(t_info['topic_id'], start_time, duration_secs, output_path, target_episode, active_domain):
+            return True
+    return False
 
-        print("   ✅ Соединение установлено. Начинаем нарезку (Ждите)...")
-        time.sleep(3) 
-        duration_str = seconds_to_time(duration_secs)
-        
-        ffmpeg_cmd = [
-            "ffmpeg", "-hide_banner", "-stats", 
-            "-i", stream_url, "-ss", start_time, "-t", duration_str,
-            "-c:v", "libx264", "-preset", "fast", "-c:a", "aac", "-y", output_path
-        ]
-
-        try:
-            result = subprocess.run(ffmpeg_cmd, timeout=180)
-            if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
-                return True
-            return False
-        except subprocess.TimeoutExpired:
-            return False
-    finally:
-        peerflix.terminate()
-        try: peerflix.wait(timeout=3)
-        except: peerflix.kill()
-        if os.path.exists(torrent_path): os.remove(torrent_path)
-
-# =====================================================================
-# 🚀 ГЛАВНЫЙ КОНТРОЛЛЕР
-# =====================================================================
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--title", required=True)
-    parser.add_argument("--orig_title", default="") # НОВЫЙ АРГУМЕНТ
+    parser.add_argument("--orig_title", default="")
     parser.add_argument("--year", default="0")
     parser.add_argument("--type", default="movie")
     parser.add_argument("--season", default="0")
@@ -298,51 +260,47 @@ def main():
     parser.add_argument("--start", required=True)
     parser.add_argument("--duration", required=True, type=int)
     parser.add_argument("--source", default="all")
+    parser.add_argument("--force_source", default="") # НОВЫЙ АРГУМЕНТ (ПРИВЯЗКА!)
     args = parser.parse_args()
 
-    if args.source == "torrent": CONFIG["search"]["priority"] = ["torrent"]
-    elif args.source == "youtube": CONFIG["search"]["priority"] = ["youtube"]
-    else: CONFIG["search"]["priority"] = ["torrent", "youtube"] if args.type == 'tv' else ["youtube", "torrent"]
-            
     is_tv = (args.type == 'tv')
     target_ep = int(args.episode) if is_tv else 0
     ensure_dir(CONFIG["clip"]["output_folder"])
     
-    # ГЕНЕРИРУЕМ СПИСОК ЗАПРОСОВ
-    queries = generate_search_queries(args.title, args.orig_title, args.year, args.type, args.season, args.episode)
-    
-    if is_tv and int(args.season) > 0:
-        safe_name = f"{args.title}_S{int(args.season):02d}E{target_ep:02d}"
-    else:
-        safe_name = f"{args.title}_{args.year}"
-        
+    if is_tv and int(args.season) > 0: safe_name = f"{args.title}_S{int(args.season):02d}E{target_ep:02d}"
+    else: safe_name = f"{args.title}_{args.year}" if int(args.year) > 0 else args.title
     safe_name = "".join(c for c in safe_name if c.isalnum() or c in " _-").strip().replace(" ", "_")
     output_file = os.path.join(CONFIG["clip"]["output_folder"], f"{safe_name}_clip.mp4")
 
-    print("="*60)
-    print(f"🎬 ЗАДАЧА: Вырезать {args.duration} сек начиная с {args.start}")
-    print("="*60)
+    print(f"🎬 Вырезаем {args.duration}с. начиная с {args.start}")
 
-    success = False
-    
-    # ПЕРЕБИРАЕМ ИСТОЧНИКИ И ЗАПРОСЫ
-    for source in CONFIG["search"]["priority"]:
-        print(f"\n================ ИСТОЧНИК: [{source.upper()}] ================")
-        
-        for query in queries:
-            if source == "youtube":
-                success = try_youtube(query, args.start, args.duration, output_file)
-            elif source == "torrent":
-                success = try_torrent(query, args.start, args.duration, output_file, target_ep, is_tv)
-                
-            if success: break # Нашли по одному из запросов - выходим из цикла запросов!
+    # === РЕЖИМ ПРЯМОГО СКАЧИВАНИЯ ПО ПРИВЯЗАННОМУ ИСТОЧНИКУ ===
+    if args.force_source:
+        s_type, s_id = args.force_source.split(':', 1)
+        print(f"📌 Используем жестко привязанный источник: {s_type} (ID: {s_id})...")
+        if s_type == 'youtube':
+            if do_youtube_download(s_id, args.start, args.duration, output_file): sys.exit(0)
+        elif s_type == 'torrent':
+            active_domain = "rutracker.org"
+            if do_torrent_download(s_id, args.start, args.duration, output_file, target_ep, active_domain): sys.exit(0)
+        print("❌ Привязанный источник больше не работает. Начинаем новый поиск!")
+
+    # === ОБЫЧНЫЙ РЕЖИМ ПОИСКА ===
+    if args.source == "torrent": CONFIG["search"]["priority"] = ["torrent"]
+    elif args.source == "youtube": CONFIG["search"]["priority"] = ["youtube"]
+    else: CONFIG["search"]["priority"] = ["torrent", "youtube"] if is_tv else ["youtube", "torrent"]
             
-        if success: break # Нашли в одном из источников - выходим из главного цикла!
+    queries = generate_search_queries(args.title, args.orig_title, args.year, args.type, args.season, args.episode)
+    success = False
 
-    if success:
-        print(f"\n🎉 ГОТОВО! Видео сохранено: {os.path.abspath(output_file)}\n")
-    else:
-        print("\n❌ ПРОВАЛ: Все запросы и источники оказались мертвы.\n")
+    for source in CONFIG["search"]["priority"]:
+        for query in queries:
+            if source == "youtube": success = try_youtube(query, args.start, args.duration, output_file)
+            elif source == "torrent": success = try_torrent(query, args.start, args.duration, output_file, target_ep, is_tv)
+            if success: break
+        if success: break
+
+    if not success: sys.exit(1)
 
 if __name__ == "__main__":
     main()
