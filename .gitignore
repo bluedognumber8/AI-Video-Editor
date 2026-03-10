@@ -22,3 +22,4 @@ dbs
 ./*.db
 *.db
 *.gz
+chroma_db
