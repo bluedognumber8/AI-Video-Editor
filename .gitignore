@@ -13,3 +13,12 @@ title.basics.tsv.gz
 ./title.basics.tsv.gz
 title.episode.tsv.gz
 ./title.episode.tsv.gz
+rus_subs2
+./rus_subs2
+opensubs.db
+./opensubs.db
+./dbs
+dbs
+./*.db
+*.db
+*.gz

@@ -34,4 +34,4 @@ def extract_all(db_path, output_dir='./rus_subs'):
     conn.close()
 
 if __name__ == "__main__":
-    extract_all("rus.db")
+    extract_all("opensubs.db")

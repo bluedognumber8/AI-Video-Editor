@@ -2,7 +2,7 @@ import sqlite3
 import pandas as pd
 
 # Подключаемся к вашей базе данных
-db_path = 'rus.db'
+db_path = 'opensubs.db'
 conn = sqlite3.connect(db_path)
 cursor = conn.cursor()
 

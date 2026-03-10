@@ -16,7 +16,8 @@ def srt_to_seconds(srt_time_str):
 def seconds_to_hms(seconds):
     return str(datetime.timedelta(seconds=int(seconds)))
 
-def search_jokes(keyword, limit=7, min_rating=0.0, target_type='all'):
+# ДОБАВЛЕН genre_filter
+def search_jokes(keyword, limit=7, min_rating=0.0, target_type='all', country_filter='all', genre_filter=None):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
@@ -26,7 +27,7 @@ def search_jokes(keyword, limit=7, min_rating=0.0, target_type='all'):
     sql = '''
         SELECT 
             m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
-            MIN(s.start_time), MAX(s.end_time), s.text, m.imdb_id
+            MIN(s.start_time), MAX(s.end_time), s.text, m.imdb_id, m.countries, m.title_original
         FROM subtitles s
         JOIN movies m ON s.imdb_id = m.imdb_id
         WHERE s.id IN (
@@ -34,14 +35,27 @@ def search_jokes(keyword, limit=7, min_rating=0.0, target_type='all'):
         )
     '''
     
+    # Фильтр по рейтингу
     if min_rating > 0:
         sql += ' AND m.rating >= ?'
         params.append(min_rating)
         
+    # Фильтр по типу (фильм/сериал)
     if target_type in ['movie', 'tv']:
         sql += ' AND m.type = ?'
         params.append(target_type)
         
+    # Фильтр по стране
+    if country_filter == 'ru':
+        sql += " AND (m.countries LIKE '%RU%' OR m.countries LIKE '%SU%')"
+    elif country_filter == 'foreign':
+        sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
+
+    # ФИЛЬТР ПО ЖАНРУ
+    if genre_filter:
+        sql += " AND m.genres LIKE ?"
+        params.append(f"%{genre_filter}%")
+
     sql += '''
         GROUP BY m.imdb_id, SUBSTR(s.start_time, 1, 5)
         ORDER BY m.rating DESC
@@ -54,8 +68,7 @@ def search_jokes(keyword, limit=7, min_rating=0.0, target_type='all'):
     conn.close()
     return results
 
-# ДОБАВЛЕН АРГУМЕНТ year
-def download_clip(title, year, imdb_id, start_srt, end_srt, m_type, season, episode, source_pref):
+def download_clip(title, orig_title, year, imdb_id, start_srt, end_srt, m_type, season, episode, source_pref):
     start_sec = max(0, srt_to_seconds(start_srt) - 3)
     end_sec = srt_to_seconds(end_srt) + 3
     duration = end_sec - start_sec
@@ -68,7 +81,8 @@ def download_clip(title, year, imdb_id, start_srt, end_srt, m_type, season, epis
     command = [
         sys.executable, "magnet_get.py",
         "--title", title,
-        "--year", str(year), # ПЕРЕДАЕМ ГОД В КАЧАЛКУ
+        "--orig_title", orig_title,
+        "--year", str(year),
         "--type", str(m_type),
         "--season", str(season),
         "--episode", str(episode),
@@ -81,7 +95,7 @@ def download_clip(title, year, imdb_id, start_srt, end_srt, m_type, season, epis
 
 def main():
     print("="*60)
-    print(" 🤖 AI-РЕЖИССЕР МОНТАЖА (v2.3 Точный поиск) ")
+    print(" 🤖 AI-РЕЖИССЕР МОНТАЖА (v2.6 Ультимативные фильтры) ")
     print("="*60)
     
     while True:
@@ -97,16 +111,33 @@ def main():
         t_type = 'all'
         if type_input == '1': t_type = 'movie'
         elif type_input == '2': t_type = 'tv'
+        
+        country_input = input("   🌍 Производство? (1 - Наше [RU/SU], 2 - Зарубежное, Enter - Везде): ").strip()
+        c_filter = 'all'
+        if country_input == '1': c_filter = 'ru'
+        elif country_input == '2': c_filter = 'foreign'
+
+        # НОВОЕ МЕНЮ ЖАНРОВ
+        genre_input = input("   🎭 Жанр? (1 - Комедия, 2 - Драма, 3 - Боевик, 4 - Фантастика, 5 - Ужасы, Enter - Любой): ").strip()
+        g_filter = None
+        if genre_input == '1': g_filter = 'Comedy'
+        elif genre_input == '2': g_filter = 'Drama'
+        elif genre_input == '3': g_filter = 'Action'
+        elif genre_input == '4': g_filter = 'Sci-Fi'
+        elif genre_input == '5': g_filter = 'Horror'
+        elif genre_input: g_filter = genre_input # Если ввели текстом (например "Romance")
             
         print("\n🔍 Ищу в локальной базе...\n")
-        results = search_jokes(word, limit=7, min_rating=min_r, target_type=t_type)
+        results = search_jokes(word, limit=7, min_rating=min_r, target_type=t_type, country_filter=c_filter, genre_filter=g_filter)
         
         if not results:
             print("❌ По вашим фильтрам ничего не найдено. Попробуйте смягчить условия.")
             continue
             
         for i, row in enumerate(results, 1):
-            title, year, genres, rating, m_type, season, ep, start, end, text, imdb_id = row
+            title, year, genres, rating, m_type, season, ep, start, end, text, imdb_id, countries, orig_title = row
+            
+            c_disp = countries if countries else "Unknown"
             
             if m_type == 'tv' and season > 0:
                 display_title = f"📺 {title} (S{season:02d}E{ep:02d})"
@@ -115,7 +146,7 @@ def main():
                 
             text_hl = re.sub(f'(?i)({word}[а-яА-Яa-zA-Z]*)', r'【\1】', text)
             
-            print(f"[{i}] {display_title} | ★ {rating} | {genres}")
+            print(f"[{i}] {display_title} | 🌍 {c_disp} | ★ {rating} | {genres}")
             print(f"    ⏱ {start} --> {end}")
             print(f"    💬 {text_hl}\n")
             
@@ -128,7 +159,8 @@ def main():
             
             download_clip(
                 title=selected[0], 
-                year=selected[1], # БЕРЕМ ГОД ИЗ ВЫБРАННОГО РЕЗУЛЬТАТА
+                orig_title=selected[12], 
+                year=selected[1], 
                 imdb_id=selected[10], 
                 start_srt=selected[7], 
                 end_srt=selected[8],
