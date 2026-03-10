@@ -1,9 +1,9 @@
 {
-  "search_mode": "По словам (Быстро ⚡️)",
+  "search_mode": "По смыслу (Нейросеть 🧠)",
   "specific_movie": "Все фильмы",
   "t_type": "Фильмы",
   "c_filter": "Наше (RU/SU)",
-  "genre_filter": "Любой",
+  "genre_filter": "Comedy",
   "min_rating": 7.0,
   "pad_start": 30.0,
   "pad_end": 30.0,

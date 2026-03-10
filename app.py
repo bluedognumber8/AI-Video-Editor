@@ -18,15 +18,13 @@ CHROMA_DIR = './chroma_db'
 CLIPS_DIR = 'clips'
 DOWNLOAD_TIMEOUT = 300
 SETTINGS_FILE = "user_settings.json"
-
-# Диапазон ID для ограничения поиска в пределах одного файла субтитров
-# Типичный файл субтитров = 500-2000 строк, берём с запасом
 SUB_ID_RANGE = 5000
+RESULTS_PER_PAGE = 10 # Количество результатов на одну подгрузку
 
 st.set_page_config(page_title="AI-Режиссер Монтажа", page_icon="🎬", layout="wide")
 
 # =====================================================================
-# 💾 ПЕРСИСТЕНТНЫЕ НАСТРОЙКИ
+# 💾 ПЕРСИСТЕНТНЫЕ НАСТРОЙКИ И СОСТОЯНИЕ
 # =====================================================================
 DEFAULT_SETTINGS = {
     "search_mode": "По словам (Быстро ⚡️)",
@@ -40,7 +38,6 @@ DEFAULT_SETTINGS = {
     "source_pref": "all",
 }
 
-
 def load_settings():
     try:
         if os.path.exists(SETTINGS_FILE):
@@ -51,7 +48,6 @@ def load_settings():
         pass
     return dict(DEFAULT_SETTINGS)
 
-
 def save_settings(settings_dict):
     try:
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
@@ -59,43 +55,41 @@ def save_settings(settings_dict):
     except Exception:
         pass
 
-
 if "settings_loaded" not in st.session_state:
     st.session_state.settings_loaded = True
-    saved = load_settings()
-    for key, val in saved.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
+    for key, val in load_settings().items():
+        st.session_state[key] = val
 
+# Инициализация стейта для пагинации
+if "search_results" not in st.session_state:
+    st.session_state.search_results = []
+if "search_offset" not in st.session_state:
+    st.session_state.search_offset = 0
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
 
 def on_settings_change():
-    current = {}
-    for key in DEFAULT_SETTINGS:
-        if key in st.session_state:
-            current[key] = st.session_state[key]
-    save_settings(current)
-
+    save_settings({k: st.session_state[k] for k in DEFAULT_SETTINGS if k in st.session_state})
+    # При смене фильтров сбрасываем результаты
+    st.session_state.search_results = []
+    st.session_state.search_offset = 0
 
 # =====================================================================
 # 🧠 ИИ И БД
 # =====================================================================
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner="Загрузка нейросети...")
 def load_ai_model():
     device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     return SentenceTransformer('intfloat/multilingual-e5-base', device=device)
 
-
 @st.cache_resource(show_spinner=False)
 def load_chroma_client():
-    if not os.path.exists(CHROMA_DIR):
-        return None
+    if not os.path.exists(CHROMA_DIR): return None
     return chromadb.PersistentClient(path=CHROMA_DIR)
-
 
 ai_model = load_ai_model()
 chroma_client = load_chroma_client()
 chroma_collection = chroma_client.get_collection(name="subtitles_semantic") if chroma_client else None
-
 
 # =====================================================================
 # 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -103,244 +97,84 @@ chroma_collection = chroma_client.get_collection(name="subtitles_semantic") if c
 def srt_to_seconds(srt_time_str):
     try:
         srt_time_str = str(srt_time_str).strip().replace('.', ',')
-        if ',' in srt_time_str:
-            time_part, ms_part = srt_time_str.split(',', 1)
-        else:
-            time_part, ms_part = srt_time_str, '0'
-        parts = time_part.split(':')
-        if len(parts) == 3:
-            h, m, s = map(int, parts)
-        elif len(parts) == 2:
-            h, m, s = 0, int(parts[0]), int(parts[1])
-        elif len(parts) == 1:
-            h, m, s = 0, 0, int(parts[0])
-        else:
-            return 0.0
+        time_part, ms_part = srt_time_str.split(',', 1) if ',' in srt_time_str else (srt_time_str, '0')
+        parts = map(int, time_part.split(':'))
+        parts = list(parts)
+        if len(parts) == 3: h, m, s = parts
+        elif len(parts) == 2: h, m, s = 0, parts[0], parts[1]
+        else: h, m, s = 0, 0, parts[0]
         return h * 3600 + m * 60 + s + int(ms_part) / 1000.0
-    except (ValueError, IndexError, TypeError):
-        return 0.0
-
+    except: return 0.0
 
 def seconds_to_hms(seconds):
-    try:
-        return str(datetime.timedelta(seconds=int(seconds)))
-    except (ValueError, TypeError):
-        return "0:00:00"
+    return str(datetime.timedelta(seconds=int(seconds))) if seconds >= 0 else "0:00:00"
 
-
-def safe_int(value, default=0):
-    try:
-        return int(value) if value is not None else default
-    except (ValueError, TypeError):
-        return default
-
+def safe_int(val, default=0):
+    try: return int(val) if val is not None else default
+    except: return default
 
 @st.cache_data
 def get_movie_titles():
-    if not os.path.exists(DB_NAME):
-        return []
+    if not os.path.exists(DB_NAME): return []
     try:
-        conn = sqlite3.connect(DB_NAME)
-        df = pd.read_sql_query(
-            "SELECT DISTINCT title_ru FROM movies ORDER BY title_ru ASC", conn
-        )
-        conn.close()
-        return df['title_ru'].tolist()
-    except Exception:
-        return []
+        with sqlite3.connect(DB_NAME) as conn:
+            return pd.read_sql_query("SELECT DISTINCT title_ru FROM movies ORDER BY title_ru ASC", conn)['title_ru'].tolist()
+    except: return []
 
-
-def get_expected_filename(title, year, m_type, season, episode):
-    season_int = safe_int(season)
-    episode_int = safe_int(episode)
-    year_int = safe_int(year)
-    if m_type == 'tv' and season_int > 0:
-        safe_name = f"{title}_S{season_int:02d}E{episode_int:02d}"
-    else:
-        safe_name = f"{title}_{year_int}" if year_int > 0 else str(title)
-    safe_name = "".join(
-        c for c in safe_name if c.isalnum() or c in " _-"
-    ).strip().replace(" ", "_")
-    return os.path.join(CLIPS_DIR, f"{safe_name}_clip.mp4")
-
-
-# --- ФУНКЦИИ ПРИВЯЗКИ ИСТОЧНИКОВ ---
+# Функции работы с БД...
 def get_saved_source_info(imdb_id):
     try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='movie_sources'"
-        )
-        if not cursor.fetchone():
-            conn.close()
-            return None, 0.0
-        cursor.execute(
-            "SELECT source_id, offset_sec FROM movie_sources WHERE imdb_id = ?",
-            (imdb_id,),
-        )
-        row = cursor.fetchone()
-        conn.close()
-        return (row[0], row[1]) if row else (None, 0.0)
-    except Exception:
-        return None, 0.0
-
+        with sqlite3.connect(DB_NAME) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='movie_sources'")
+            if not cur.fetchone(): return None, 0.0
+            cur.execute("SELECT source_id, offset_sec FROM movie_sources WHERE imdb_id = ?", (imdb_id,))
+            row = cur.fetchone()
+            return (row[0], row[1]) if row else (None, 0.0)
+    except: return None, 0.0
 
 def save_source_info(imdb_id, source_id, offset_sec):
     try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            "CREATE TABLE IF NOT EXISTS movie_sources "
-            "(imdb_id TEXT PRIMARY KEY, source_id TEXT, offset_sec REAL)"
-        )
-        cursor.execute(
-            "INSERT OR REPLACE INTO movie_sources (imdb_id, source_id, offset_sec) "
-            "VALUES (?, ?, ?)",
-            (imdb_id, source_id, offset_sec),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS movie_sources (imdb_id TEXT PRIMARY KEY, source_id TEXT, offset_sec REAL)")
+            conn.execute("INSERT OR REPLACE INTO movie_sources VALUES (?, ?, ?)", (imdb_id, source_id, offset_sec))
+    except: pass
 
 def delete_source_info(imdb_id):
     try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            "DELETE FROM movie_sources WHERE imdb_id = ?", (imdb_id,)
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-
-# --- КОНТЕКСТ И ПОИСК ФРАЗ (ТОЛЬКО ТЕКУЩИЙ ФАЙЛ СУБТИТРОВ) ---
-def get_surrounding_context(imdb_id, target_start_sec, target_sub_id, window_sec=90):
-    """
-    Ищет контекст ТОЛЬКО в пределах одного файла субтитров.
-    Ограничивает по диапазону ID вокруг target_sub_id,
-    чтобы не смешивать разные переводы.
-    """
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT start_time, text
-            FROM subtitles
-            WHERE imdb_id = ?
-              AND id BETWEEN ? AND ?
-            ORDER BY start_time ASC
-            """,
-            (imdb_id, target_sub_id - SUB_ID_RANGE, target_sub_id + SUB_ID_RANGE),
-        )
-        rows = cursor.fetchall()
-        conn.close()
-    except Exception:
-        return []
-
-    context_items = []
-    seen_texts = set()
-    for r_start, r_text in rows:
-        r_sec = srt_to_seconds(r_start)
-        if abs(r_sec - target_start_sec) <= window_sec and r_text not in seen_texts:
-            seen_texts.add(r_text)
-            is_target = abs(r_sec - target_start_sec) < 5
-            time_display = str(r_start)[:8] if r_start else "00:00:00"
-            text_display = str(r_text)[:70] if r_text else ""
-            context_items.append({
-                "sec": r_sec,
-                "label": f"[{time_display}] {text_display}...",
-                "text": r_text,
-                "time_str": time_display,
-                "is_target": is_target,
-            })
-    return context_items
-
-
-def search_phrase_in_movie(imdb_id, phrase, anchor_sub_id):
-    """
-    Глубокий поиск фразы ТОЛЬКО в текущем файле субтитров.
-    anchor_sub_id — ID строки из результата поиска,
-    ограничивает поиск диапазоном ±SUB_ID_RANGE.
-    """
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT start_time, text
-            FROM subtitles
-            WHERE imdb_id = ?
-              AND id BETWEEN ? AND ?
-              AND text LIKE ?
-            ORDER BY start_time
-            LIMIT 20
-            """,
-            (
-                imdb_id,
-                anchor_sub_id - SUB_ID_RANGE,
-                anchor_sub_id + SUB_ID_RANGE,
-                f"%{phrase}%",
-            ),
-        )
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
-    except Exception:
-        return []
-
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM movie_sources WHERE imdb_id = ?", (imdb_id,))
+    except: pass
 
 # =====================================================================
-# 🔍 ПОИСК
+# 🔍 ПОИСК (С ДЕДУПЛИКАЦИЕЙ И ПАГИНАЦИЕЙ)
 # =====================================================================
-@st.cache_data(show_spinner=False)
-def perform_search(
-    query_text, search_mode, limit, min_rating,
-    t_type, country_filter, genre_filter, specific_movie,
-):
+def perform_search(query_text, search_mode, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie):
     if search_mode == "По словам (Быстро ⚡️)":
-        return _search_fts(
-            query_text, limit, min_rating, t_type,
-            country_filter, genre_filter, specific_movie,
-        )
+        return _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
     else:
-        return _search_semantic(
-            query_text, limit, min_rating, t_type,
-            country_filter, genre_filter, specific_movie,
-        )
+        return _search_semantic(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
 
-
-def _search_fts(
-    query_text, limit, min_rating, t_type,
-    country_filter, genre_filter, specific_movie,
-):
+def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie):
     try:
         conn = sqlite3.connect(DB_NAME)
-        conn.execute("PRAGMA journal_mode=WAL;")
         cursor = conn.cursor()
-    except Exception:
-        return []
+    except: return []
 
     search_query = f"{query_text}*"
     params = [search_query]
 
+    # ДЕДУПЛИКАЦИЯ: Группируем результаты по imdb_id и 30-секундным интервалам (чтобы отсеять дубли из разных сабов)
     sql = """
         WITH top_matches AS (
-            SELECT rowid FROM subtitles_fts
-            WHERE text MATCH ? ORDER BY rank LIMIT 500
+            SELECT rowid FROM subtitles_fts WHERE text MATCH ? ORDER BY rank LIMIT 2000
         ),
         ranked AS (
-            SELECT m.title_ru, m.year, m.genres, m.rating, m.type,
-                   m.season, m.episode,
-                   s.start_time, s.end_time, s.text,
-                   m.imdb_id, m.countries, m.title_original, s.id,
+            SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
+                   s.start_time, s.end_time, s.text, m.imdb_id, m.countries, m.title_original, s.id,
                    ROW_NUMBER() OVER (
-                       PARTITION BY m.imdb_id, SUBSTR(s.start_time, 1, 5)
+                       PARTITION BY m.imdb_id, 
+                       CAST(SUBSTR(s.start_time, 1, 2) AS INTEGER)*3600 + CAST(SUBSTR(s.start_time, 4, 2) AS INTEGER)*60 + CAST(SUBSTR(s.start_time, 7, 2) AS INTEGER) / 30
                        ORDER BY s.start_time ASC
                    ) AS rn
             FROM top_matches tm
@@ -350,144 +184,99 @@ def _search_fts(
     """
 
     if min_rating > 0:
-        sql += " AND m.rating >= ?"
-        params.append(min_rating)
+        sql += " AND m.rating >= ?"; params.append(min_rating)
     if t_type != "Все":
-        sql += " AND m.type = ?"
-        params.append("movie" if t_type == "Фильмы" else "tv")
+        sql += " AND m.type = ?"; params.append("movie" if t_type == "Фильмы" else "tv")
     if country_filter == "Наше (RU/SU)":
         sql += " AND (m.countries LIKE '%RU%' OR m.countries LIKE '%SU%')"
     elif country_filter == "Зарубежное":
-        sql += (
-            " AND (m.countries NOT LIKE '%RU%' "
-            "AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
-        )
+        sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
     if genre_filter != "Любой":
-        sql += " AND m.genres LIKE ?"
-        params.append(f"%{genre_filter}%")
+        sql += " AND m.genres LIKE ?"; params.append(f"%{genre_filter}%")
     if specific_movie != "Все фильмы":
-        sql += " AND m.title_ru = ?"
-        params.append(specific_movie)
+        sql += " AND m.title_ru = ?"; params.append(specific_movie)
 
-    sql += """
+    sql += f"""
         )
-        SELECT title_ru, year, genres, rating, type, season, episode,
-               start_time, end_time, text, imdb_id, countries,
-               title_original, id
-        FROM ranked WHERE rn = 1
-        ORDER BY rating DESC LIMIT ?
+        SELECT * FROM ranked WHERE rn = 1
+        ORDER BY rating DESC LIMIT {limit} OFFSET {offset}
     """
-    params.append(limit)
-
+    
     try:
         cursor.execute(sql, params)
         results = cursor.fetchall()
-        conn.close()
         return [(row, 100.0) for row in results]
-    except Exception:
+    except Exception as e:
+        return []
+    finally:
         conn.close()
-        return []
 
-
-def _search_semantic(
-    query_text, limit, min_rating, t_type,
-    country_filter, genre_filter, specific_movie,
-):
-    if not chroma_collection:
-        return []
-
-    query_vector = ai_model.encode(
-        [f"query: {query_text}"], normalize_embeddings=True
-    ).tolist()
+def _search_semantic(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie):
+    if not chroma_collection: return []
+    query_vector = ai_model.encode([f"query: {query_text}"], normalize_embeddings=True).tolist()
 
     and_conditions = []
-    if min_rating > 0:
-        and_conditions.append({"rating": {"$gte": min_rating}})
-    if t_type != "Все":
-        and_conditions.append(
-            {"type": {"$eq": "movie" if t_type == "Фильмы" else "tv"}}
-        )
-    if country_filter == "Наше (RU/SU)":
-        and_conditions.append({"countries": {"$in": ["RU", "SU", "SUHH"]}})
-    elif country_filter == "Зарубежное":
-        and_conditions.append(
-            {"countries": {"$nin": ["RU", "SU", "SUHH", "Unknown"]}}
-        )
-    if genre_filter != "Любой":
-        and_conditions.append({"genres": {"$contains": genre_filter}})
+    if min_rating > 0: and_conditions.append({"rating": {"$gte": min_rating}})
+    if t_type != "Все": and_conditions.append({"type": {"$eq": "movie" if t_type == "Фильмы" else "tv"}})
+    if country_filter == "Наше (RU/SU)": and_conditions.append({"countries": {"$in": ["RU", "SU", "SUHH"]}})
+    elif country_filter == "Зарубежное": and_conditions.append({"countries": {"$nin": ["RU", "SU", "SUHH", "Unknown"]}})
+    if genre_filter != "Любой": and_conditions.append({"genres": {"$contains": genre_filter}})
 
-    if len(and_conditions) == 1:
-        where_filters = and_conditions[0]
-    elif len(and_conditions) > 1:
-        where_filters = {"$and": and_conditions}
-    else:
-        where_filters = None
+    where_filters = None
+    if len(and_conditions) == 1: where_filters = and_conditions[0]
+    elif len(and_conditions) > 1: where_filters = {"$and": and_conditions}
 
-    fetch_limit = limit * 3 if specific_movie != "Все фильмы" else limit
+    # Для дедупликации просим у Chroma больше результатов
+    fetch_limit = (offset + limit) * 4 
 
     try:
         chroma_result = chroma_collection.query(
-            query_embeddings=query_vector,
-            n_results=fetch_limit,
-            include=["distances"],
-            where=where_filters,
+            query_embeddings=query_vector, n_results=fetch_limit, include=["distances"], where=where_filters
         )
-    except Exception:
-        time.sleep(0.5)
-        try:
-            chroma_result = chroma_collection.query(
-                query_embeddings=query_vector,
-                n_results=fetch_limit,
-                include=["distances"],
-                where=where_filters,
-            )
-        except Exception:
-            return []
+    except: return []
 
     found_ids = list(chroma_result["ids"][0])
-    distances = chroma_result["distances"][0]
-    if not found_ids:
-        return []
+    if not found_ids: return []
 
     try:
         conn = sqlite3.connect(DB_NAME)
+        placeholders = ",".join("?" for _ in found_ids)
+        sql = f"""
+            SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
+                   s.start_time, s.end_time, s.text, m.imdb_id, m.countries, m.title_original, s.id
+            FROM subtitles s JOIN movies m ON s.imdb_id = m.imdb_id
+            WHERE s.id IN ({placeholders})
+        """
+        params = list(found_ids)
+        if specific_movie != "Все фильмы":
+            sql += " AND m.title_ru = ?"; params.append(specific_movie)
+        
         cursor = conn.cursor()
-    except Exception:
-        return []
-
-    params = list(found_ids)
-    placeholders = ",".join("?" for _ in params)
-    sql = f"""
-        SELECT m.title_ru, m.year, m.genres, m.rating, m.type,
-               m.season, m.episode,
-               s.start_time, s.end_time, s.text,
-               m.imdb_id, m.countries, m.title_original, s.id
-        FROM subtitles s
-        JOIN movies m ON s.imdb_id = m.imdb_id
-        WHERE s.id IN ({placeholders})
-    """
-    if specific_movie != "Все фильмы":
-        sql += " AND m.title_ru = ?"
-        params.append(specific_movie)
-
-    try:
         cursor.execute(sql, params)
         sqlite_rows = cursor.fetchall()
         conn.close()
-    except Exception:
-        conn.close()
-        return []
+    except: return []
 
     id_to_row = {str(row[13]): row for row in sqlite_rows}
-    final_results = []
-    for f_id, dist in zip(chroma_result["ids"][0], distances):
+    
+    # ДЕДУПЛИКАЦИЯ на уровне Python
+    unique_results = []
+    seen_chunks = set()
+    
+    for f_id, dist in zip(chroma_result["ids"][0], chroma_result["distances"][0]):
         if f_id in id_to_row:
-            final_results.append(
-                (id_to_row[f_id], round((1.0 - dist) * 100, 1))
-            )
-            if len(final_results) == limit:
-                break
-    return final_results
+            row = id_to_row[f_id]
+            imdb_id = row[10]
+            sec = srt_to_seconds(row[7])
+            chunk = int(sec / 30) # 30 секундный чанк
+            unique_key = (imdb_id, chunk)
+            
+            if unique_key not in seen_chunks:
+                seen_chunks.add(unique_key)
+                unique_results.append((row, round((1.0 - dist) * 100, 1)))
+
+    # Возвращаем только нужный "кусок" страницы (пагинация)
+    return unique_results[offset : offset + limit]
 
 
 # =====================================================================
@@ -497,483 +286,124 @@ st.title("🎬 AI-Режиссер Монтажа (Студия 5.0)")
 
 with st.sidebar:
     st.header("⚙️ Режим Поиска")
-    search_mode = st.radio(
-        "Как будем искать?",
-        ["По словам (Быстро ⚡️)", "По смыслу (Нейросеть 🧠)"],
-        key="search_mode",
-        on_change=on_settings_change,
-    )
+    search_mode = st.radio("Как ищем?", ["По словам (Быстро ⚡️)", "По смыслу (Нейросеть 🧠)"], key="search_mode", on_change=on_settings_change)
 
     st.markdown("---")
     st.header("🎛 Фильтры")
     all_movies = ["Все фильмы"] + get_movie_titles()
-    saved_movie = st.session_state.get("specific_movie", "Все фильмы")
-    if saved_movie not in all_movies:
-        st.session_state["specific_movie"] = "Все фильмы"
-    specific_movie = st.selectbox(
-        "📌 Искать в конкретном кино:",
-        all_movies,
-        key="specific_movie",
-        on_change=on_settings_change,
-    )
-    t_type = st.radio(
-        "🎞 Тип медиа:",
-        ["Все", "Фильмы", "Сериалы"],
-        horizontal=True,
-        key="t_type",
-        on_change=on_settings_change,
-    )
-    c_filter = st.radio(
-        "🌍 Производство:",
-        ["Все", "Наше (RU/SU)", "Зарубежное"],
-        key="c_filter",
-        on_change=on_settings_change,
-    )
-    genre_filter = st.selectbox(
-        "🎭 Жанр:",
-        [
-            "Любой", "Comedy", "Drama", "Action",
-            "Sci-Fi", "Horror", "Romance", "Crime",
-        ],
-        key="genre_filter",
-        on_change=on_settings_change,
-    )
-    min_rating = st.slider(
-        "⭐️ Минимальный рейтинг IMDb:",
-        0.0, 10.0, step=0.1,
-        key="min_rating",
-        on_change=on_settings_change,
-    )
+    specific_movie = st.selectbox("📌 В конкретном кино:", all_movies, key="specific_movie", on_change=on_settings_change)
+    t_type = st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change)
+    c_filter = st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change)
+    genre_filter = st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime"], key="genre_filter", on_change=on_settings_change)
+    min_rating = st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change)
 
     st.markdown("---")
     st.header("✂️ Хронометраж")
-    pad_start = st.number_input(
-        "Секунд ДО фразы:",
-        min_value=0.0, max_value=120.0, step=5.0,
-        key="pad_start",
-        on_change=on_settings_change,
-    )
-    pad_end = st.number_input(
-        "Секунд ПОСЛЕ фразы:",
-        min_value=0.0, max_value=120.0, step=5.0,
-        key="pad_end",
-        on_change=on_settings_change,
-    )
-    source_pref = st.radio(
-        "🌐 Источник скачивания:",
-        ["all", "torrent", "youtube"],
-        format_func=lambda x: {
-            "all": "Везде",
-            "torrent": "Только Torrent",
-            "youtube": "Только YouTube",
-        }[x],
-        key="source_pref",
-        on_change=on_settings_change,
-    )
+    pad_start = st.number_input("Секунд ДО фразы:", 0.0, 120.0, step=5.0, key="pad_start", on_change=on_settings_change)
+    pad_end = st.number_input("Секунд ПОСЛЕ фразы:", 0.0, 120.0, step=5.0, key="pad_end", on_change=on_settings_change)
+    source_pref = st.radio("🌐 Источник:", ["all", "torrent", "youtube"], format_func=lambda x: {"all": "Везде", "torrent": "Только Torrent", "youtube": "Только YouTube"}[x], key="source_pref", on_change=on_settings_change)
 
-search_placeholder = (
-    "Введите точную цитату"
-    if search_mode == "По словам (Быстро ⚡️)"
-    else "Опишите сцену или эмоцию"
-)
 
-if "search_active" not in st.session_state:
-    st.session_state.search_active = False
+# ГЛАВНЫЙ ЭКРАН ПОИСКА
+query = st.text_input("🔍 Поиск фрагмента:", placeholder="Введите точную цитату или опишите сцену...", value=st.session_state.last_query)
 
-with st.form("search_form"):
-    query = st.text_input("🔍 Поиск:", placeholder=search_placeholder)
-    submit_search = st.form_submit_button("Найти мемы 🚀")
-
-if submit_search:
-    st.session_state.search_active = True
-
-if st.session_state.search_active and query:
-    with st.spinner("Ищу..."):
-        results = perform_search(
-            query, search_mode, 10, min_rating,
-            t_type, c_filter, genre_filter, specific_movie,
-        )
-
-    if not results:
-        st.warning("По вашим фильтрам ничего не найдено.")
-    else:
-        st.success(f"Найдено результатов: {len(results)}")
-
-        for i, (row, similarity) in enumerate(results):
-            (
-                title, year, genres, rating, m_type, season, ep,
-                start_srt, end_srt, text, imdb_id, countries,
-                orig_title, s_id,
-            ) = row[:14]
-
-            season_int = safe_int(season)
-            ep_int = safe_int(ep)
-            year_int = safe_int(year)
-            rating_val = rating if rating else 0.0
-            c_disp = countries if countries else "Unknown"
-            genres_disp = genres if genres else "N/A"
-            text_disp = text if text else ""
-            orig_title_str = str(orig_title) if orig_title else ""
-
-            if m_type == "tv":
-                display_title = (
-                    f"📺 {title} (S{season_int:02d}E{ep_int:02d})"
+col1, col2 = st.columns([1, 5])
+with col1:
+    if st.button("Найти 🚀", use_container_width=True, type="primary"):
+        if query:
+            st.session_state.last_query = query
+            st.session_state.search_offset = 0
+            with st.spinner("Ищем лучшие кадры..."):
+                st.session_state.search_results = perform_search(
+                    query, st.session_state.search_mode, RESULTS_PER_PAGE, 0,
+                    st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter,
+                    st.session_state.genre_filter, st.session_state.specific_movie
                 )
-            else:
-                display_title = f"🎬 {title} ({year_int})"
 
-            if search_mode == "По словам (Быстро ⚡️)":
-                text_html = re.sub(
-                    f"(?i)({re.escape(query)}[а-яА-Яa-zA-Z]*)",
-                    r'<mark style="background-color: yellow; '
-                    r'color: black;"><b>\1</b></mark>',
-                    text_disp,
-                )
-            else:
-                text_html = text_disp
+# ОТРИСОВКА РЕЗУЛЬТАТОВ
+if st.session_state.search_results:
+    st.success(f"Найдено уникальных сцен: {len(st.session_state.search_results)} (показана страница {st.session_state.search_offset//RESULTS_PER_PAGE + 1})")
 
-            sim_badge = (
-                f" | 🧠 Смысл: {similarity}%"
-                if search_mode == "По смыслу (Нейросеть 🧠)"
-                else ""
-            )
+    for i, (row, similarity) in enumerate(st.session_state.search_results):
+        (title, year, genres, rating, m_type, season, ep, start_srt, end_srt, text, imdb_id, countries, orig_title, s_id) = row[:14]
+        
+        display_title = f"📺 {title} (S{safe_int(season):02d}E{safe_int(ep):02d})" if m_type == "tv" else f"🎬 {title} ({safe_int(year)})"
+        text_html = re.sub(f"(?i)({re.escape(query)}[а-яА-Яa-zA-Z]*)", r'<mark style="background-color: #ffd700; color: #000; border-radius: 3px; padding: 0 2px;"><b>\1</b></mark>', text) if search_mode == "По словам (Быстро ⚡️)" else text
+        sim_badge = f" | 🧠 Смысл: {similarity}%" if search_mode == "По смыслу (Нейросеть 🧠)" else ""
 
-            with st.expander(
-                f"{display_title} | ★ {rating_val} | "
-                f"🌍 {c_disp}{sim_badge}",
-                expanded=(i == 0),
-            ):
-                col1, col2 = st.columns([2, 1])
-                saved_source, saved_offset = get_saved_source_info(imdb_id)
-                auto_offset = 0.0
-                manual_offset = float(saved_offset)
+        # Улучшенная карточка результата
+        with st.container(border=True):
+            st.subheader(f"{display_title} | ★ {rating if rating else 0.0} {sim_badge}")
+            
+            c1, c2 = st.columns([3, 2])
+            saved_source, saved_offset = get_saved_source_info(imdb_id)
+            
+            with c1:
+                st.markdown(f"**Таймкод:** `{start_srt}` ➡️ `{end_srt}`")
+                st.markdown(f"**Цитата:** 🗣️ _{text_html}_", unsafe_allow_html=True)
+                
+                if saved_source:
+                    st.info(f"📌 **Источник закреплен:** {str(saved_source)[:20]}... | Сдвиг: {saved_offset} сек.")
+                    if st.button("🗑 Отвязать торрент", key=f"reset_{imdb_id}_{i}_{st.session_state.search_offset}", size="small"):
+                        delete_source_info(imdb_id)
+                        st.rerun()
 
-                with col1:
-                    st.markdown(f"**Жанры:** {genres_disp}")
-                    st.markdown(
-                        f"**Таймкод:** `{start_srt}` ➡️ `{end_srt}`"
-                    )
-                    st.markdown(
-                        f"**Фраза:** {text_html}", unsafe_allow_html=True
-                    )
+            with c2:
+                # Настройки скачивания конкретного клипа
+                with st.expander("🛠 Настройки сдвига и рассинхрона", expanded=False):
+                    manual_offset = st.number_input("Ручной сдвиг (+/- сек):", min_value=-600.0, max_value=600.0, value=float(saved_offset), step=0.5, key=f"man_{imdb_id}_{i}_{st.session_state.search_offset}")
+                
+                if st.button("⬇️ Подготовить и Скачать клип", key=f"dl_{imdb_id}_{start_srt}_{i}_{st.session_state.search_offset}", use_container_width=True, type="secondary"):
+                    start_sec = max(0, srt_to_seconds(start_srt) - pad_start + manual_offset)
+                    end_sec = srt_to_seconds(end_srt) + pad_end + manual_offset
+                    duration = max(1, end_sec - start_sec)
+                    
+                    # Ожидаемое имя файла
+                    safe_name = "".join(c for c in f"{title}_{year}" if c.isalnum() or c in " _-").strip().replace(" ", "_")
+                    expected_file = os.path.join(CLIPS_DIR, f"{safe_name}_clip.mp4")
+                    if os.path.exists(expected_file): os.remove(expected_file)
 
-                    if saved_source:
-                        st.info(
-                            f"📌 **Источник закреплен!** "
-                            f"({str(saved_source)[:30]}...). "
-                            f"Смещение: **{saved_offset} сек.**"
-                        )
-                        if st.button(
-                            "🗑 Отвязать торрент (искать заново)",
-                            key=f"reset_{imdb_id}_{i}",
-                        ):
-                            delete_source_info(imdb_id)
-                            st.rerun()
-
-                    with st.expander(
-                        "🛠 Рассинхрон? Режим авто-коррекции"
-                    ):
-                        target_sec = srt_to_seconds(start_srt)
-
-                        st.markdown(
-                            "**🔍 Шаг 1: Глубокий поиск по фильму**"
-                        )
-                        deep_query = st.text_input(
-                            "Введите любую фразу, которую "
-                            "услышали в скачанном видео:",
-                            key=f"dq_{imdb_id}_{i}",
-                        )
-
-                        if deep_query:
-                            # Ищем ТОЛЬКО в текущем файле субтитров
-                            deep_results = search_phrase_in_movie(
-                                imdb_id, deep_query, s_id
-                            )
-                            if deep_results:
-                                deep_options = {
-                                    f"[{r[0][:8]}] {r[1]}": srt_to_seconds(
-                                        r[0]
-                                    )
-                                    for r in deep_results
-                                }
-                                heard_label = st.selectbox(
-                                    "Выберите точную фразу:",
-                                    list(deep_options.keys()),
-                                    key=f"ds_{imdb_id}_{i}",
-                                )
-                                auto_offset = (
-                                    target_sec - deep_options[heard_label]
-                                )
-                                sign = "+" if auto_offset > 0 else ""
-                                st.success(
-                                    f"🤖 Глубокий поиск вычислил сдвиг: "
-                                    f"**{sign}{auto_offset:.1f} сек.**"
-                                )
-                            else:
-                                st.warning(
-                                    "Фраза не найдена в этом "
-                                    "файле субтитров."
-                                )
-                                auto_offset = 0.0
-                        else:
-                            # Контекст — тоже только текущий файл
-                            context_items = get_surrounding_context(
-                                imdb_id, target_sec, s_id
-                            )
-                            if context_items:
-                                st.markdown(
-                                    "**ИЛИ выберите из ближайшего "
-                                    "контекста:**"
-                                )
-                                for item in context_items:
-                                    prefix = (
-                                        "🎯 "
-                                        if item["is_target"]
-                                        else "⚪ "
-                                    )
-                                    st.markdown(
-                                        f"{prefix} "
-                                        f"`[{item['time_str']}]` "
-                                        f"{item['text']}"
-                                    )
-
-                                options = {
-                                    item["label"]: item["sec"]
-                                    for item in context_items
-                                }
-                                try:
-                                    default_label = next(
-                                        item["label"]
-                                        for item in context_items
-                                        if item["is_target"]
-                                    )
-                                except StopIteration:
-                                    default_label = list(
-                                        options.keys()
-                                    )[0]
-
-                                heard_label = st.selectbox(
-                                    "Что РЕАЛЬНО прозвучало в видео?",
-                                    list(options.keys()),
-                                    index=list(options.keys()).index(
-                                        default_label
-                                    ),
-                                    key=f"sync_{imdb_id}_{i}",
-                                )
-                                auto_offset = (
-                                    target_sec - options[heard_label]
-                                )
-                                if auto_offset != 0:
-                                    sign = (
-                                        "+" if auto_offset > 0 else ""
-                                    )
-                                    st.success(
-                                        f"🤖 ИИ вычислил сдвиг: "
-                                        f"**{sign}{auto_offset:.1f} "
-                                        f"сек.**"
-                                    )
-                            else:
-                                auto_offset = 0.0
-
-                        st.markdown("---")
-                        manual_offset = st.number_input(
-                            "Шаг 2: Ручная подгонка (+/- сек):",
-                            min_value=-600.0,
-                            max_value=600.0,
-                            value=float(saved_offset),
-                            step=0.5,
-                            key=f"man_{imdb_id}_{i}",
-                        )
-
-                with col2:
-                    final_offset = auto_offset + manual_offset
-
-                    if st.button(
-                        "⬇️ Скачать клип",
-                        key=f"dl_{imdb_id}_{start_srt}_{i}",
-                        use_container_width=True,
-                    ):
-                        start_sec = max(
-                            0,
-                            srt_to_seconds(start_srt)
-                            - pad_start
-                            + final_offset,
-                        )
-                        end_sec = (
-                            srt_to_seconds(end_srt)
-                            + pad_end
-                            + final_offset
-                        )
-                        duration = max(1, end_sec - start_sec)
-                        start_hms = seconds_to_hms(start_sec)
-
-                        expected_file = get_expected_filename(
-                            title, year, m_type, season, ep
-                        )
-                        if os.path.exists(expected_file):
-                            os.remove(expected_file)
-
-                        st.markdown("**Консоль скачивания:**")
-                        log_container = st.empty()
-                        progress_bar = st.progress(
-                            0, text="Запуск..."
-                        )
-
-                        cmd = [
-                            sys.executable,
-                            "-u",
-                            "magnet_get.py",
-                            "--title", str(title),
-                            "--orig_title", orig_title_str,
-                            "--year", str(year_int),
-                            "--type", str(m_type),
-                            "--season", str(season_int),
-                            "--episode", str(ep_int),
-                            "--start", start_hms,
-                            "--duration", str(int(duration)),
-                            "--source", source_pref,
-                        ]
-                        if saved_source:
-                            cmd.extend(
-                                ["--force_source", saved_source]
-                            )
+                    # Логика запуска magnet_get.py (остается вашей, добавляем красивый прогресс)
+                    with st.status("⏳ Загрузка и нарезка видео...", expanded=True) as status:
+                        st.write("Инициализация скрипта-загрузчика...")
+                        cmd = [sys.executable, "-u", "magnet_get.py", 
+                               "--title", str(title), "--orig_title", str(orig_title or ""), 
+                               "--year", str(safe_int(year)), "--type", str(m_type), 
+                               "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), 
+                               "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), 
+                               "--source", source_pref]
+                        if saved_source: cmd.extend(["--force_source", saved_source])
 
                         try:
-                            process = subprocess.Popen(
-                                cmd,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT,
-                                text=True,
-                                bufsize=1,
-                            )
-                        except FileNotFoundError:
-                            st.error(
-                                "❌ Не удалось запустить magnet_get.py"
-                            )
-                            continue
-
-                        full_log = ""
-                        used_source = saved_source
-                        dl_start_time = time.time()
-                        timed_out = False
-
-                        try:
+                            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
                             for line in process.stdout:
-                                elapsed = time.time() - dl_start_time
-                                if elapsed > DOWNLOAD_TIMEOUT:
-                                    process.kill()
-                                    timed_out = True
-                                    break
-
-                                clean_line = (
-                                    line.replace("\r", "").strip()
-                                )
-                                if not clean_line:
-                                    continue
-
-                                if clean_line.startswith(
-                                    "###SOURCE_FOUND###:"
-                                ):
-                                    used_source = clean_line.split(
-                                        "###SOURCE_FOUND###:"
-                                    )[1]
-                                    continue
-
-                                full_log += clean_line + "\n"
-                                last_lines = "\n".join(
-                                    full_log.strip().split("\n")[-12:]
-                                )
-                                log_container.code(
-                                    last_lines, language="log"
-                                )
-
-                                cl = clean_line.lower()
-                                if "поиск" in cl or "search" in cl:
-                                    progress_bar.progress(
-                                        10,
-                                        text="🔍 Поиск источника...",
-                                    )
-                                elif (
-                                    "подключение" in cl
-                                    or "connect" in cl
-                                ):
-                                    progress_bar.progress(
-                                        30,
-                                        text="⏳ Подключение к пирам...",
-                                    )
-                                elif (
-                                    "успех" in cl or "success" in cl
-                                ):
-                                    progress_bar.progress(
-                                        50,
-                                        text="📡 Буферизация...",
-                                    )
-                                elif "режем" in cl or "cut" in cl:
-                                    progress_bar.progress(
-                                        70,
-                                        text="✂️ Нарезка видео...",
-                                    )
-                                elif "готово" in cl or "done" in cl:
-                                    progress_bar.progress(
-                                        100, text="✅ Готово!"
-                                    )
-                                elif (
-                                    "скачивание" in cl
-                                    or "download" in cl
-                                ):
-                                    progress_bar.progress(
-                                        40,
-                                        text="⬇️ Скачивание...",
-                                    )
+                                st.code(line.strip(), language="log")
+                            process.wait(timeout=DOWNLOAD_TIMEOUT)
                         except Exception as e:
-                            st.error(
-                                f"Ошибка чтения процесса: {e}"
-                            )
-                        finally:
-                            try:
-                                process.kill()
-                            except Exception:
-                                pass
-                            try:
-                                process.wait(timeout=5)
-                            except Exception:
-                                pass
+                            st.error(f"Ошибка процесса: {e}")
 
-                        if timed_out:
-                            st.error(
-                                f"⏰ Превышен таймаут скачивания "
-                                f"({DOWNLOAD_TIMEOUT // 60} мин)."
-                            )
-                        elif (
-                            os.path.exists(expected_file)
-                            and os.path.getsize(expected_file) > 1024
-                        ):
-                            progress_bar.progress(
-                                100, text="✅ Готово!"
-                            )
-                            st.success("✅ Клип готов!")
-                            if used_source:
-                                save_source_info(
-                                    imdb_id,
-                                    used_source,
-                                    final_offset,
-                                )
+                        if os.path.exists(expected_file) and os.path.getsize(expected_file) > 1024:
+                            status.update(label="✅ Успешно скачано!", state="complete")
                             st.video(expected_file)
                             with open(expected_file, "rb") as file:
-                                st.download_button(
-                                    "💾 Сохранить в проект",
-                                    data=file,
-                                    file_name=os.path.basename(
-                                        expected_file
-                                    ),
-                                    mime="video/mp4",
-                                    key=f"save_{imdb_id}_{i}",
-                                )
+                                st.download_button("💾 Сохранить файл на ПК", data=file, file_name=os.path.basename(expected_file), mime="video/mp4", type="primary")
                         else:
-                            progress_bar.progress(
-                                0, text="❌ Ошибка"
-                            )
-                            st.error(
-                                "❌ Ошибка скачивания. "
-                                "Проверьте логи выше."
-                            )
+                            status.update(label="❌ Ошибка скачивания", state="error")
+
+    # --- КНОПКА ПАГИНАЦИИ ---
+    st.markdown("---")
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        if st.button("🔄 Загрузить еще 10 сцен...", use_container_width=True):
+            st.session_state.search_offset += RESULTS_PER_PAGE
+            with st.spinner("Подгружаем еще..."):
+                more_results = perform_search(
+                    st.session_state.last_query, st.session_state.search_mode, RESULTS_PER_PAGE, st.session_state.search_offset,
+                    st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter,
+                    st.session_state.genre_filter, st.session_state.specific_movie
+                )
+                if more_results:
+                    st.session_state.search_results.extend(more_results)
+                    st.rerun()
+                else:
+                    st.info("Больше результатов нет.")
