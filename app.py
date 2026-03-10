@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import sqlite3
 import pandas as pd
@@ -5,21 +6,54 @@ import re
 import datetime
 import subprocess
 import sys
-import os
 import time
 import json
-import chromadb
-from sentence_transformers import SentenceTransformer
-import torch
+import requests
+
+# --- ИНИЦИАЛИЗАЦИЯ МОРФОЛОГИИ (NLTK + PYMORPHY3) ---
+try:
+    import nltk
+    from nltk.stem.snowball import SnowballStemmer
+    try: nltk.data.find('corpora/wordnet')
+    except LookupError:
+        nltk.download('wordnet', quiet=True)
+        nltk.download('omw-1.4', quiet=True)
+    try: nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        nltk.download('punkt', quiet=True)
+    ru_stemmer = SnowballStemmer("russian")
+except Exception:
+    ru_stemmer = None
+
+try:
+    import pymorphy3
+    morph = pymorphy3.MorphAnalyzer()
+except ImportError:
+    morph = None
+    print("⚠️ ВНИМАНИЕ: Установите pymorphy3 (pip install pymorphy3) для идеального русского поиска!")
 
 # --- НАСТРОЙКИ ---
 DB_NAME = 'movies_master.sqlite'
-CHROMA_DIR = './chroma_db'
 CLIPS_DIR = 'clips'
 DOWNLOAD_TIMEOUT = 300
 SETTINGS_FILE = "user_settings.json"
-SUB_ID_RANGE = 5000
-RESULTS_PER_PAGE = 10 # Количество результатов на одну подгрузку
+RESULTS_PER_PAGE = 10 
+SUB_ID_RANGE = 5000 
+
+os.makedirs(CLIPS_DIR, exist_ok=True)
+
+# --- НАСТРОЙКИ OPENROUTER ---
+OPENROUTER_API_KEY = "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"
+
+# Список от самых умных к самым безотказным (танкам)
+LLM_MODELS_FALLBACK = [
+    "google/gemini-2.5-flash:free",
+    "meta-llama/llama-3.3-70b-instruct:free",         
+    "qwen/qwen-2.5-7b-instruct:free",
+    "gryphe/mythomax-l2-13b:free",     # Танк 1
+    "undi95/toppy-m-7b:free",          # Танк 2
+    "openchat/openchat-7b:free"        # Танк 3
+]
 
 st.set_page_config(page_title="AI-Режиссер Монтажа", page_icon="🎬", layout="wide")
 
@@ -36,70 +70,109 @@ DEFAULT_SETTINGS = {
     "pad_start": 30.0,
     "pad_end": 30.0,
     "source_pref": "all",
+    "ai_scenario": "💍 Свадебный (юмор и реакция на 1 слово)"
 }
 
 def load_settings():
-    try:
-        if os.path.exists(SETTINGS_FILE):
+    if os.path.exists(SETTINGS_FILE):
+        try:
             with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                saved = json.load(f)
-            return {**DEFAULT_SETTINGS, **saved}
-    except Exception:
-        pass
+                return {**DEFAULT_SETTINGS, **json.load(f)}
+        except: pass
     return dict(DEFAULT_SETTINGS)
 
 def save_settings(settings_dict):
     try:
         with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
             json.dump(settings_dict, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    except: pass
 
 if "settings_loaded" not in st.session_state:
     st.session_state.settings_loaded = True
     for key, val in load_settings().items():
         st.session_state[key] = val
 
-# Инициализация стейта для пагинации
-if "search_results" not in st.session_state:
-    st.session_state.search_results = []
-if "search_offset" not in st.session_state:
-    st.session_state.search_offset = 0
-if "last_query" not in st.session_state:
-    st.session_state.last_query = ""
+if "search_results" not in st.session_state: st.session_state.search_results = []
+if "search_offset" not in st.session_state: st.session_state.search_offset = 0
+if "last_query" not in st.session_state: st.session_state.last_query = ""
+if "search_query_input" not in st.session_state: st.session_state.search_query_input = ""
+if "trigger_search" not in st.session_state: st.session_state.trigger_search = False
+if "llm_ideas" not in st.session_state: st.session_state.llm_ideas = []
+if "active_downloads" not in st.session_state: st.session_state.active_downloads = {}
+
+def trigger_new_search():
+    if st.session_state.search_query_input.strip():
+        st.session_state.last_query = st.session_state.search_query_input
+        st.session_state.search_offset = 0
+        st.session_state.trigger_search = True
 
 def on_settings_change():
     save_settings({k: st.session_state[k] for k in DEFAULT_SETTINGS if k in st.session_state})
-    # При смене фильтров сбрасываем результаты
-    st.session_state.search_results = []
     st.session_state.search_offset = 0
+    if st.session_state.get("search_query_input", "").strip():
+        st.session_state.last_query = st.session_state.search_query_input
+        st.session_state.trigger_search = True 
+    else:
+        st.session_state.search_results = []
+
+def on_download_settings_change():
+    save_settings({k: st.session_state[k] for k in DEFAULT_SETTINGS if k in st.session_state})
 
 # =====================================================================
-# 🧠 ИИ И БД
+# 🧠 ИИ АГЕНТ (OPENROUTER) - ПАРСИНГ РЕЖИССЕРСКИХ ИДЕЙ
 # =====================================================================
-@st.cache_resource(show_spinner="Загрузка нейросети...")
-def load_ai_model():
-    device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
-    return SentenceTransformer('intfloat/multilingual-e5-base', device=device)
+def extract_json_from_llm(text):
+    try:
+        start = text.find('[')
+        end = text.rfind(']') + 1
+        if start != -1 and end != -1:
+            return json.loads(text[start:end])
+    except: pass
+    return []
 
-@st.cache_resource(show_spinner=False)
-def load_chroma_client():
-    if not os.path.exists(CHROMA_DIR): return None
-    return chromadb.PersistentClient(path=CHROMA_DIR)
+def call_openrouter(system_prompt, user_prompt, log_widget=None):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://localhost",
+        "X-OpenRouter-Title": "AI Director Studio"
+    }
+    
+    combined_prompt = f"ИНСТРУКЦИЯ:\n{system_prompt}\n\nЗАДАЧА:\n{user_prompt}"
 
-ai_model = load_ai_model()
-chroma_client = load_chroma_client()
-chroma_collection = chroma_client.get_collection(name="subtitles_semantic") if chroma_client else None
+    for model in LLM_MODELS_FALLBACK:
+        msg = f"⏳ Думает ИИ: `{model}`..."
+        if log_widget: log_widget.write(msg) 
+        
+        try:
+            payload = json.dumps({
+                "model": model, 
+                "messages": [{"role": "user", "content": combined_prompt}], 
+                "temperature": 0.5
+            })
+            
+            resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=payload, timeout=15)
+            
+            if resp.status_code == 200:
+                if log_widget: log_widget.write(f"✅ Успешно ({model})!")
+                return resp.json()['choices'][0]['message']['content'].strip()
+            else:
+                if log_widget: log_widget.warning(f"⚠️ Ошибка {resp.status_code} ({model}).")
+        except Exception: 
+            if log_widget: log_widget.warning(f"❌ Ошибка сети ({model}). Пробуем дальше...")
+            continue
+            
+    if log_widget: log_widget.error("❌ Все ИИ модели перегружены или недоступны.")
+    return None
 
 # =====================================================================
-# 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ 
 # =====================================================================
 def srt_to_seconds(srt_time_str):
     try:
         srt_time_str = str(srt_time_str).strip().replace('.', ',')
         time_part, ms_part = srt_time_str.split(',', 1) if ',' in srt_time_str else (srt_time_str, '0')
-        parts = map(int, time_part.split(':'))
-        parts = list(parts)
+        parts = list(map(int, time_part.split(':')))
         if len(parts) == 3: h, m, s = parts
         elif len(parts) == 2: h, m, s = 0, parts[0], parts[1]
         else: h, m, s = 0, 0, parts[0]
@@ -121,7 +194,42 @@ def get_movie_titles():
             return pd.read_sql_query("SELECT DISTINCT title_ru FROM movies ORDER BY title_ru ASC", conn)['title_ru'].tolist()
     except: return []
 
-# Функции работы с БД...
+def get_surrounding_context(imdb_id, target_start_sec, target_sub_id, window_sec=90):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT start_time, text FROM subtitles
+                WHERE imdb_id = ? AND id BETWEEN ? AND ? ORDER BY start_time ASC
+            """, (imdb_id, target_sub_id - SUB_ID_RANGE, target_sub_id + SUB_ID_RANGE))
+            rows = cursor.fetchall()
+    except: return []
+
+    context_items = []
+    seen_texts = set()
+    for r_start, r_text in rows:
+        r_sec = srt_to_seconds(r_start)
+        if abs(r_sec - target_start_sec) <= window_sec and r_text not in seen_texts:
+            seen_texts.add(r_text)
+            time_display = str(r_start)[:8] if r_start else "00:00:00"
+            context_items.append({
+                "sec": r_sec, "label": f"[{time_display}] {str(r_text)[:70]}...", "text": r_text,
+                "time_str": time_display, "is_target": abs(r_sec - target_start_sec) < 5
+            })
+    return context_items
+
+def search_phrase_in_movie(imdb_id, phrase, anchor_sub_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT start_time, text FROM subtitles
+                WHERE imdb_id = ? AND id BETWEEN ? AND ? AND text LIKE ?
+                ORDER BY start_time LIMIT 20
+            """, (imdb_id, anchor_sub_id - SUB_ID_RANGE, anchor_sub_id + SUB_ID_RANGE, f"%{phrase}%"))
+            return cursor.fetchall()
+    except: return []
+
 def get_saved_source_info(imdb_id):
     try:
         with sqlite3.connect(DB_NAME) as conn:
@@ -147,151 +255,154 @@ def delete_source_info(imdb_id):
     except: pass
 
 # =====================================================================
-# 🔍 ПОИСК (С ДЕДУПЛИКАЦИЕЙ И ПАГИНАЦИЕЙ)
+# 🔍 ПОИСКОВЫЕ АЛГОРИТМЫ
 # =====================================================================
-def perform_search(query_text, search_mode, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie):
+def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params):
+    sql = ""
+    if min_rating > 0: sql += " AND m.rating >= ?"; params.append(min_rating)
+    if t_type != "Все": sql += " AND m.type = ?"; params.append("movie" if t_type == "Фильмы" else "tv")
+    if country_filter == "Наше (RU/SU)": sql += " AND (m.countries LIKE '%RU%' OR m.countries LIKE '%SU%')"
+    elif country_filter == "Зарубежное": sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
+    if genre_filter != "Любой": sql += " AND m.genres LIKE ?"; params.append(f"%{genre_filter}%")
+    if specific_movie != "Все фильмы": sql += " AND m.title_ru = ?"; params.append(specific_movie)
+    return sql
+
+def perform_search(query_text, search_mode, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, log_widget=None):
     if search_mode == "По словам (Быстро ⚡️)":
+        if log_widget: log_widget.write("⚡ Выполняем точный поиск по базе субтитров...")
         return _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
-    else:
-        return _search_semantic(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
+    else: 
+        return _search_ai_agent(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, log_widget)
 
 def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
+    try: conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
     except: return []
 
-    search_query = f"{query_text}*"
+    # УЛЬТИМАТИВНЫЙ РУССКИЙ ПОИСК С МОРФОЛОГИЕЙ И СТЕММИНГОМ
+    search_terms = []
+    for word in re.findall(r'\w+', query_text):
+        word = word.lower()
+        if re.search(r'[а-яё]', word):
+            variants = {word}
+            if morph:
+                lemma = morph.parse(word)[0].normal_form
+                variants.add(lemma)
+            if ru_stemmer:
+                variants.add(ru_stemmer.stem(word))
+                if morph: variants.add(ru_stemmer.stem(lemma))
+            if len(word) >= 7: variants.add(word[:5])
+            elif len(word) >= 5: variants.add(word[:4])
+
+            group = []
+            for v in variants:
+                group.append(f"{v}*")
+                if 'е' in v: group.append(f"{v.replace('е', 'ё')}*")
+                if 'ё' in v: group.append(f"{v.replace('ё', 'е')}*")
+            search_terms.append(f"({' OR '.join(set(group))})")
+        else:
+            search_terms.append(f"{word}*")
+            
+    search_query = " AND ".join(search_terms) if search_terms else "*"
     params = [search_query]
 
-    # ДЕДУПЛИКАЦИЯ: Группируем результаты по imdb_id и 30-секундным интервалам (чтобы отсеять дубли из разных сабов)
-    sql = """
-        WITH top_matches AS (
-            SELECT rowid FROM subtitles_fts WHERE text MATCH ? ORDER BY rank LIMIT 2000
-        ),
+    # СУПЕР-ДЕДУПЛИКАЦИЯ: Группировка по фильму + по очищенному тексту (первым 20 буквам)
+    sql = f"""
+        WITH top_matches AS (SELECT rowid FROM subtitles_fts WHERE text MATCH ? ORDER BY rank LIMIT 2000),
         ranked AS (
             SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
                    s.start_time, s.end_time, s.text, m.imdb_id, m.countries, m.title_original, s.id,
                    ROW_NUMBER() OVER (
-                       PARTITION BY m.imdb_id, 
-                       CAST(SUBSTR(s.start_time, 1, 2) AS INTEGER)*3600 + CAST(SUBSTR(s.start_time, 4, 2) AS INTEGER)*60 + CAST(SUBSTR(s.start_time, 7, 2) AS INTEGER) / 30
+                       PARTITION BY m.imdb_id, SUBSTR(LTRIM(LOWER(s.text), ' .-,:;!?…"'''), 1, 20) 
                        ORDER BY s.start_time ASC
                    ) AS rn
-            FROM top_matches tm
-            JOIN subtitles s ON s.id = tm.rowid
-            JOIN movies m ON s.imdb_id = m.imdb_id
-            WHERE 1=1
+            FROM top_matches tm JOIN subtitles s ON s.id = tm.rowid JOIN movies m ON s.imdb_id = m.imdb_id WHERE 1=1
     """
-
-    if min_rating > 0:
-        sql += " AND m.rating >= ?"; params.append(min_rating)
-    if t_type != "Все":
-        sql += " AND m.type = ?"; params.append("movie" if t_type == "Фильмы" else "tv")
-    if country_filter == "Наше (RU/SU)":
-        sql += " AND (m.countries LIKE '%RU%' OR m.countries LIKE '%SU%')"
-    elif country_filter == "Зарубежное":
-        sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
-    if genre_filter != "Любой":
-        sql += " AND m.genres LIKE ?"; params.append(f"%{genre_filter}%")
-    if specific_movie != "Все фильмы":
-        sql += " AND m.title_ru = ?"; params.append(specific_movie)
-
-    sql += f"""
-        )
-        SELECT * FROM ranked WHERE rn = 1
-        ORDER BY rating DESC LIMIT {limit} OFFSET {offset}
-    """
+    sql += build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params)
+    sql += f") SELECT * FROM ranked WHERE rn = 1 ORDER BY rating DESC LIMIT {limit} OFFSET {offset}"
     
-    try:
+    try: 
         cursor.execute(sql, params)
-        results = cursor.fetchall()
-        return [(row, 100.0) for row in results]
-    except Exception as e:
+        return [(row, 100.0) for row in cursor.fetchall()]
+    except Exception as e: 
+        print(f"FTS ERROR: {e}")
         return []
-    finally:
-        conn.close()
+    finally: conn.close()
 
-def _search_semantic(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie):
-    if not chroma_collection: return []
-    query_vector = ai_model.encode([f"query: {query_text}"], normalize_embeddings=True).tolist()
-
-    and_conditions = []
-    if min_rating > 0: and_conditions.append({"rating": {"$gte": min_rating}})
-    if t_type != "Все": and_conditions.append({"type": {"$eq": "movie" if t_type == "Фильмы" else "tv"}})
-    if country_filter == "Наше (RU/SU)": and_conditions.append({"countries": {"$in": ["RU", "SU", "SUHH"]}})
-    elif country_filter == "Зарубежное": and_conditions.append({"countries": {"$nin": ["RU", "SU", "SUHH", "Unknown"]}})
-    if genre_filter != "Любой": and_conditions.append({"genres": {"$contains": genre_filter}})
-
-    where_filters = None
-    if len(and_conditions) == 1: where_filters = and_conditions[0]
-    elif len(and_conditions) > 1: where_filters = {"$and": and_conditions}
-
-    # Для дедупликации просим у Chroma больше результатов
-    fetch_limit = (offset + limit) * 4 
-
-    try:
-        chroma_result = chroma_collection.query(
-            query_embeddings=query_vector, n_results=fetch_limit, include=["distances"], where=where_filters
-        )
-    except: return []
-
-    found_ids = list(chroma_result["ids"][0])
-    if not found_ids: return []
-
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        placeholders = ",".join("?" for _ in found_ids)
-        sql = f"""
-            SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
-                   s.start_time, s.end_time, s.text, m.imdb_id, m.countries, m.title_original, s.id
-            FROM subtitles s JOIN movies m ON s.imdb_id = m.imdb_id
-            WHERE s.id IN ({placeholders})
-        """
-        params = list(found_ids)
-        if specific_movie != "Все фильмы":
-            sql += " AND m.title_ru = ?"; params.append(specific_movie)
+def _search_ai_agent(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, log_widget=None):
+    if offset == 0:
+        scenario = st.session_state.get("ai_scenario", "🎬 Стандартный (поиск по описанию)")
         
-        cursor = conn.cursor()
-        cursor.execute(sql, params)
-        sqlite_rows = cursor.fetchall()
-        conn.close()
-    except: return []
+        if "Свадебный" in scenario:
+            system_p = """Ты гениальный комедийный режиссер видеомонтажа. Гость на свадьбе говорит ОДНО слово (пожелание). 
+Придумай 3 смешные, абсурдные или легендарные цитаты из известного кино (СССР/Россия), которые станут идеальной реакцией на это слово (на контрасте или прямой ассоциации).
+ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (массив из 3 объектов). НЕ ПИШИ НИКАКИХ СЛОВ ДО ИЛИ ПОСЛЕ JSON. ТОЛЬКО МАССИВ КВАДРАТНЫХ СКОБОК:
+[
+  {"quote": "только сама точная цитата без кавычек", "movie": "название фильма", "reasoning": "твоя режиссерская задумка - почему это смешно"}
+]"""
+            user_p = f"Слово гостя: {query_text}"
+        else:
+            system_p = """Ты режиссер. Пользователь описывает сцену. Придумай 3 короткие фразы, которые герои могли бы сказать в такой ситуации.
+ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON. НЕ ПИШИ НИКАКИХ СЛОВ ДО ИЛИ ПОСЛЕ JSON. ТОЛЬКО МАССИВ КВАДРАТНЫХ СКОБОК:
+[
+  {"quote": "цитата", "movie": "предполагаемый жанр", "reasoning": "почему эта фраза подходит"}
+]"""
+            user_p = f"Опиши сцену: {query_text}"
 
-    id_to_row = {str(row[13]): row for row in sqlite_rows}
+        llm_response = call_openrouter(system_p, user_p, log_widget)
+        st.session_state.llm_ideas = extract_json_from_llm(llm_response) if llm_response else []
+
+    results = []
     
-    # ДЕДУПЛИКАЦИЯ на уровне Python
-    unique_results = []
-    seen_chunks = set()
-    
-    for f_id, dist in zip(chroma_result["ids"][0], chroma_result["distances"][0]):
-        if f_id in id_to_row:
-            row = id_to_row[f_id]
-            imdb_id = row[10]
-            sec = srt_to_seconds(row[7])
-            chunk = int(sec / 30) # 30 секундный чанк
-            unique_key = (imdb_id, chunk)
+    if getattr(st.session_state, 'llm_ideas', []):
+        if log_widget: log_widget.write("⚡ **Шаг 2:** Ищем сгенерированные фразы в базе субтитров...")
+        for idea in st.session_state.llm_ideas:
+            phrase = idea.get('quote', '')
+            if phrase:
+                fts_res = _search_fts(phrase, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
+                results.extend(fts_res)
+    else:
+        if log_widget: log_widget.write("⚠️ ИИ не смог выдать данные. Выполняем точный поиск по вашему слову...")
+        results = _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
             
-            if unique_key not in seen_chunks:
-                seen_chunks.add(unique_key)
-                unique_results.append((row, round((1.0 - dist) * 100, 1)))
-
-    # Возвращаем только нужный "кусок" страницы (пагинация)
-    return unique_results[offset : offset + limit]
-
+    if log_widget: log_widget.write("🧹 Фильтруем дубликаты текстов...")
+    seen_phrases, final_res = set(), []
+    
+    # Python Дедупликация для собранных в кучу результатов ИИ
+    for row in sorted(results, key=lambda x: x[1], reverse=True):
+        imdb_id = row[0][10]
+        text = row[0][9]
+        clean_text = re.sub(r'[^\w\s]', '', str(text).lower()).strip()[:20]
+        unique_key = (imdb_id, clean_text)
+        
+        if unique_key not in seen_phrases:
+            seen_phrases.add(unique_key)
+            final_res.append(row)
+            
+    return final_res[:limit]
 
 # =====================================================================
-# 🎨 ИНТЕРФЕЙС
+# 🎨 ИНТЕРФЕЙС И САЙДБАР
 # =====================================================================
-st.title("🎬 AI-Режиссер Монтажа (Студия 5.0)")
-
 with st.sidebar:
     st.header("⚙️ Режим Поиска")
-    search_mode = st.radio("Как ищем?", ["По словам (Быстро ⚡️)", "По смыслу (Нейросеть 🧠)"], key="search_mode", on_change=on_settings_change)
+    search_mode = st.radio("Как ищем?", ["По словам (Быстро ⚡️)", "ИИ-Агент (OpenRouter 🤖)"], key="search_mode", on_change=on_settings_change)
+
+    if search_mode == "ИИ-Агент (OpenRouter 🤖)":
+        st.selectbox(
+            "🎭 Режиссерский сценарий:",
+            ["🎬 Стандартный (поиск по описанию)", "💍 Свадебный (юмор и реакция на 1 слово)"],
+            key="ai_scenario",
+            on_change=on_settings_change
+        )
 
     st.markdown("---")
     st.header("🎛 Фильтры")
     all_movies = ["Все фильмы"] + get_movie_titles()
-    specific_movie = st.selectbox("📌 В конкретном кино:", all_movies, key="specific_movie", on_change=on_settings_change)
+    current_movie_idx = 0
+    if st.session_state.get("specific_movie") in all_movies:
+        current_movie_idx = all_movies.index(st.session_state["specific_movie"])
+
+    specific_movie = st.selectbox("📌 В конкретном кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
     t_type = st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change)
     c_filter = st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change)
     genre_filter = st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime"], key="genre_filter", on_change=on_settings_change)
@@ -299,44 +410,120 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("✂️ Хронометраж")
-    pad_start = st.number_input("Секунд ДО фразы:", 0.0, 120.0, step=5.0, key="pad_start", on_change=on_settings_change)
-    pad_end = st.number_input("Секунд ПОСЛЕ фразы:", 0.0, 120.0, step=5.0, key="pad_end", on_change=on_settings_change)
-    source_pref = st.radio("🌐 Источник:", ["all", "torrent", "youtube"], format_func=lambda x: {"all": "Везде", "torrent": "Только Torrent", "youtube": "Только YouTube"}[x], key="source_pref", on_change=on_settings_change)
+    pad_start = st.number_input("Секунд ДО фразы:", 0.0, 120.0, step=5.0, key="pad_start", on_change=on_download_settings_change)
+    pad_end = st.number_input("Секунд ПОСЛЕ фразы:", 0.0, 120.0, step=5.0, key="pad_end", on_change=on_download_settings_change)
+    source_pref = st.radio("🌐 Источник:", ["all", "torrent", "youtube"], format_func=lambda x: {"all": "Везде", "torrent": "Только Torrent", "youtube": "Только YouTube"}[x], key="source_pref", on_change=on_download_settings_change)
 
+# =====================================================================
+# 📥 МЕНЕДЖЕР ЗАГРУЗОК (ФОНОВЫЕ ЗАДАЧИ)
+# =====================================================================
+if st.session_state.active_downloads:
+    with st.expander(f"📥 Менеджер загрузок (Активных: {len([t for t in st.session_state.active_downloads.values() if t['status'] == 'running'])})", expanded=True):
+        st.caption("💡 *Если видео скачалось с рассинхроном (звук мимо), удалите его здесь, поменяйте «Ручную подгонку» в карточке результата ниже и скачайте заново.*")
+        cols = st.columns(3)
+        for idx, (task_id, task) in enumerate(list(st.session_state.active_downloads.items())):
+            col = cols[idx % 3]
+            with col:
+                with st.container(border=True):
+                    st.write(f"**{task['title']}**")
+                    
+                    if task['status'] == 'running':
+                        poll = task['process'].poll()
+                        if poll is None:
+                            st.info("⏳ Идет скачивание и нарезка...")
+                            try:
+                                with open(task['log_file'], 'r', encoding='utf-8') as f:
+                                    lines = f.readlines()
+                                    if lines: st.code(lines[-1].strip(), language="log")
+                            except: pass
+                            
+                            if st.button("Остановить ❌", key=f"stop_{task_id}"):
+                                task['process'].terminate()
+                                task['status'] = 'stopped'
+                                st.rerun()
+                        else:
+                            if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024:
+                                task['status'] = 'success'
+                            else:
+                                task['status'] = 'error'
+                            st.rerun()
+                            
+                    elif task['status'] == 'success':
+                        st.success("✅ Готово!")
+                        st.video(task['file_path'])
+                        with open(task['file_path'], "rb") as file:
+                            st.download_button("💾 Сохранить", data=file, file_name=os.path.basename(task['file_path']), mime="video/mp4", key=f"dl_btn_{task_id}", type="primary")
+                        if st.button("Удалить из списка", key=f"clear_{task_id}"):
+                            del st.session_state.active_downloads[task_id]
+                            st.rerun()
+                            
+                    elif task['status'] in ['error', 'stopped']:
+                        st.error("❌ Ошибка или отменено")
+                        try:
+                            with open(task['log_file'], 'r', encoding='utf-8') as f:
+                                st.code("".join(f.readlines()[-5:]), language="log")
+                        except: pass
+                        if st.button("Убрать", key=f"clear_{task_id}"):
+                            del st.session_state.active_downloads[task_id]
+                            st.rerun()
+        
+        st.button("🔄 Обновить статусы", use_container_width=True)
+        st.markdown("---")
 
-# ГЛАВНЫЙ ЭКРАН ПОИСКА
-query = st.text_input("🔍 Поиск фрагмента:", placeholder="Введите точную цитату или опишите сцену...", value=st.session_state.last_query)
+# =====================================================================
+# ГЛАВНЫЙ ЭКРАН И РЕЗУЛЬТАТЫ
+# =====================================================================
+st.text_input("🔍 Поиск фрагмента:", placeholder="Введите точную цитату или опишите сцену и нажмите Enter...", 
+              key="search_query_input", on_change=trigger_new_search)
 
 col1, col2 = st.columns([1, 5])
 with col1:
     if st.button("Найти 🚀", use_container_width=True, type="primary"):
-        if query:
-            st.session_state.last_query = query
-            st.session_state.search_offset = 0
-            with st.spinner("Ищем лучшие кадры..."):
-                st.session_state.search_results = perform_search(
-                    query, st.session_state.search_mode, RESULTS_PER_PAGE, 0,
-                    st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter,
-                    st.session_state.genre_filter, st.session_state.specific_movie
-                )
+        trigger_new_search()
 
-# ОТРИСОВКА РЕЗУЛЬТАТОВ
+# ВЫПОЛНЕНИЕ ПОИСКА
+if st.session_state.trigger_search:
+    st.session_state.trigger_search = False
+    with st.status("🔍 Запуск поиска и анализ...", expanded=True) as status_box:
+        st.session_state.search_results = perform_search(
+            st.session_state.last_query, st.session_state.search_mode, RESULTS_PER_PAGE, 0,
+            st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter,
+            st.session_state.genre_filter, st.session_state.specific_movie, log_widget=status_box
+        )
+        if st.session_state.search_results: status_box.update(label="✅ Анализ завершен! Сцены найдены.", state="complete", expanded=False)
+        else: status_box.update(label="❌ Ничего не найдено", state="error", expanded=False)
+
+# --- БЛОК ОТОБРАЖЕНИЯ ИДЕЙ ИИ ---
+if search_mode == "ИИ-Агент (OpenRouter 🤖)" and getattr(st.session_state, 'llm_ideas', []):
+    st.markdown("### 🧠 Режиссерские задумки ИИ:")
+    df_ideas = pd.DataFrame(st.session_state.llm_ideas)
+    if not df_ideas.empty:
+        df_ideas.columns = ["Фраза для поиска", "Ожидаемый фильм/Жанр", "Почему это круто (Задумка)"]
+        st.table(df_ideas)
+    st.markdown("---")
+
+# --- ОТРИСОВКА РЕЗУЛЬТАТОВ ---
 if st.session_state.search_results:
-    st.success(f"Найдено уникальных сцен: {len(st.session_state.search_results)} (показана страница {st.session_state.search_offset//RESULTS_PER_PAGE + 1})")
+    st.success(f"Найдено сцен: {len(st.session_state.search_results)} (показана страница {st.session_state.search_offset//RESULTS_PER_PAGE + 1})")
 
     for i, (row, similarity) in enumerate(st.session_state.search_results):
         (title, year, genres, rating, m_type, season, ep, start_srt, end_srt, text, imdb_id, countries, orig_title, s_id) = row[:14]
-        
         display_title = f"📺 {title} (S{safe_int(season):02d}E{safe_int(ep):02d})" if m_type == "tv" else f"🎬 {title} ({safe_int(year)})"
-        text_html = re.sub(f"(?i)({re.escape(query)}[а-яА-Яa-zA-Z]*)", r'<mark style="background-color: #ffd700; color: #000; border-radius: 3px; padding: 0 2px;"><b>\1</b></mark>', text) if search_mode == "По словам (Быстро ⚡️)" else text
-        sim_badge = f" | 🧠 Смысл: {similarity}%" if search_mode == "По смыслу (Нейросеть 🧠)" else ""
+        
+        # Подсветка текста
+        text_html = text
+        if search_mode == "По словам (Быстро ⚡️)" and st.session_state.last_query:
+            words = [re.escape(w) for w in re.findall(r'\w+', st.session_state.last_query)]
+            pattern = f"(?i)({'|'.join(words)})[а-яА-Яa-zA-Z]*" if words else ""
+            try: text_html = re.sub(pattern, r'<mark style="background-color: #ffd700; color: #000; border-radius: 3px; padding: 0 2px;"><b>\g<0></b></mark>', text) if pattern else text
+            except: pass
 
-        # Улучшенная карточка результата
         with st.container(border=True):
-            st.subheader(f"{display_title} | ★ {rating if rating else 0.0} {sim_badge}")
+            st.subheader(f"{display_title} | ★ {rating if rating else 0.0}")
             
             c1, c2 = st.columns([3, 2])
             saved_source, saved_offset = get_saved_source_info(imdb_id)
+            auto_offset = 0.0
             
             with c1:
                 st.markdown(f"**Таймкод:** `{start_srt}` ➡️ `{end_srt}`")
@@ -344,51 +531,76 @@ if st.session_state.search_results:
                 
                 if saved_source:
                     st.info(f"📌 **Источник закреплен:** {str(saved_source)[:20]}... | Сдвиг: {saved_offset} сек.")
-                    if st.button("🗑 Отвязать торрент", key=f"reset_{imdb_id}_{i}_{st.session_state.search_offset}", size="small"):
+                    if st.button("🗑 Отвязать торрент", key=f"reset_{imdb_id}_{i}_{st.session_state.search_offset}"):
                         delete_source_info(imdb_id)
                         st.rerun()
 
             with c2:
-                # Настройки скачивания конкретного клипа
                 with st.expander("🛠 Настройки сдвига и рассинхрона", expanded=False):
-                    manual_offset = st.number_input("Ручной сдвиг (+/- сек):", min_value=-600.0, max_value=600.0, value=float(saved_offset), step=0.5, key=f"man_{imdb_id}_{i}_{st.session_state.search_offset}")
+                    target_sec = srt_to_seconds(start_srt)
+                    
+                    st.markdown("**🔍 Шаг 1: Искать точную фразу в файле**")
+                    deep_query = st.text_input("Услышали другую фразу в видео?", key=f"dq_{imdb_id}_{i}_{st.session_state.search_offset}")
+                    
+                    if deep_query:
+                        deep_results = search_phrase_in_movie(imdb_id, deep_query, s_id)
+                        if deep_results:
+                            deep_options = {f"[{r[0][:8]}] {r[1]}": srt_to_seconds(r[0]) for r in deep_results}
+                            heard_label = st.selectbox("Выберите точную фразу:", list(deep_options.keys()), key=f"ds_{imdb_id}_{i}_{st.session_state.search_offset}")
+                            auto_offset = target_sec - deep_options[heard_label]
+                            st.success(f"🤖 Сдвиг: **{'+' if auto_offset > 0 else ''}{auto_offset:.1f} сек.**")
+                        else: st.warning("Фраза не найдена.")
+                    else:
+                        context_items = get_surrounding_context(imdb_id, target_sec, s_id)
+                        if context_items:
+                            st.markdown("**ИЛИ выберите из ближайшего текста:**")
+                            options = {item["label"]: item["sec"] for item in context_items}
+                            default_label = next((item["label"] for item in context_items if item["is_target"]), list(options.keys())[0])
+                            
+                            heard_label = st.selectbox("Что прозвучало в видео?", list(options.keys()), index=list(options.keys()).index(default_label), key=f"sync_{imdb_id}_{i}_{st.session_state.search_offset}")
+                            auto_offset = target_sec - options[heard_label]
+                            if auto_offset != 0: st.success(f"🤖 Сдвиг: **{'+' if auto_offset > 0 else ''}{auto_offset:.1f} сек.**")
+
+                    st.markdown("---")
+                    st.caption("Если видео скачалось криво, измените это значение и нажмите СКАЧАТЬ заново:")
+                    manual_offset = st.number_input("Шаг 2: Ручная подгонка (+/- сек):", min_value=-600.0, max_value=600.0, value=float(saved_offset), step=0.5, key=f"man_{imdb_id}_{i}_{st.session_state.search_offset}")
                 
-                if st.button("⬇️ Подготовить и Скачать клип", key=f"dl_{imdb_id}_{start_srt}_{i}_{st.session_state.search_offset}", use_container_width=True, type="secondary"):
-                    start_sec = max(0, srt_to_seconds(start_srt) - pad_start + manual_offset)
-                    end_sec = srt_to_seconds(end_srt) + pad_end + manual_offset
+                final_offset = auto_offset + manual_offset
+
+                if st.button("⬇️ Отправить в очередь загрузки", key=f"dl_{imdb_id}_{start_srt}_{i}_{st.session_state.search_offset}", use_container_width=True, type="secondary"):
+                    start_sec = max(0, srt_to_seconds(start_srt) - pad_start + final_offset)
+                    end_sec = srt_to_seconds(end_srt) + pad_end + final_offset
                     duration = max(1, end_sec - start_sec)
                     
-                    # Ожидаемое имя файла
+                    task_id = f"task_{imdb_id}_{int(time.time())}"
                     safe_name = "".join(c for c in f"{title}_{year}" if c.isalnum() or c in " _-").strip().replace(" ", "_")
-                    expected_file = os.path.join(CLIPS_DIR, f"{safe_name}_clip.mp4")
-                    if os.path.exists(expected_file): os.remove(expected_file)
+                    
+                    # ПАРАЛЛЕЛЬНОСТЬ: Уникальное имя файла
+                    expected_file = os.path.join(CLIPS_DIR, f"{safe_name}_{task_id}.mp4")
+                    
+                    # ПАРАЛЛЕЛЬНОСТЬ: Передача аргумента --output
+                    cmd = [sys.executable, "-u", "magnet_get.py", "--title", str(title), "--orig_title", str(orig_title or ""), 
+                           "--year", str(safe_int(year)), "--type", str(m_type), "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), 
+                           "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), "--source", source_pref,
+                           "--output", expected_file]
+                    
+                    if saved_source: cmd.extend(["--force_source", saved_source])
 
-                    # Логика запуска magnet_get.py (остается вашей, добавляем красивый прогресс)
-                    with st.status("⏳ Загрузка и нарезка видео...", expanded=True) as status:
-                        st.write("Инициализация скрипта-загрузчика...")
-                        cmd = [sys.executable, "-u", "magnet_get.py", 
-                               "--title", str(title), "--orig_title", str(orig_title or ""), 
-                               "--year", str(safe_int(year)), "--type", str(m_type), 
-                               "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), 
-                               "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), 
-                               "--source", source_pref]
-                        if saved_source: cmd.extend(["--force_source", saved_source])
-
-                        try:
-                            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-                            for line in process.stdout:
-                                st.code(line.strip(), language="log")
-                            process.wait(timeout=DOWNLOAD_TIMEOUT)
-                        except Exception as e:
-                            st.error(f"Ошибка процесса: {e}")
-
-                        if os.path.exists(expected_file) and os.path.getsize(expected_file) > 1024:
-                            status.update(label="✅ Успешно скачано!", state="complete")
-                            st.video(expected_file)
-                            with open(expected_file, "rb") as file:
-                                st.download_button("💾 Сохранить файл на ПК", data=file, file_name=os.path.basename(expected_file), mime="video/mp4", type="primary")
-                        else:
-                            status.update(label="❌ Ошибка скачивания", state="error")
+                    log_file_path = os.path.join(CLIPS_DIR, f"{task_id}_log.txt")
+                    
+                    log_file = open(log_file_path, "w", encoding="utf-8")
+                    process = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, text=True)
+                    
+                    st.session_state.active_downloads[task_id] = {
+                        "title": f"{display_title} [{start_srt}]",
+                        "process": process,
+                        "file_path": expected_file,
+                        "log_file": log_file_path,
+                        "status": "running"
+                    }
+                    
+                    st.toast("📥 Видео добавлено в фоновую очередь! Смотрите Менеджер загрузок вверху.")
+                    st.rerun()
 
     # --- КНОПКА ПАГИНАЦИИ ---
     st.markdown("---")
@@ -396,14 +608,16 @@ if st.session_state.search_results:
     with col2:
         if st.button("🔄 Загрузить еще 10 сцен...", use_container_width=True):
             st.session_state.search_offset += RESULTS_PER_PAGE
-            with st.spinner("Подгружаем еще..."):
+            with st.status("🔄 Подгружаем дополнительные сцены...", expanded=True) as load_more_status:
                 more_results = perform_search(
                     st.session_state.last_query, st.session_state.search_mode, RESULTS_PER_PAGE, st.session_state.search_offset,
                     st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter,
-                    st.session_state.genre_filter, st.session_state.specific_movie
+                    st.session_state.genre_filter, st.session_state.specific_movie, log_widget=load_more_status
                 )
                 if more_results:
                     st.session_state.search_results.extend(more_results)
+                    load_more_status.update(label="✅ Сцены подгружены!", state="complete", expanded=False)
                     st.rerun()
                 else:
+                    load_more_status.update(label="Больше результатов нет", state="error", expanded=False)
                     st.info("Больше результатов нет.")

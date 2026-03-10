@@ -1,11 +1,12 @@
 {
-  "search_mode": "По смыслу (Нейросеть 🧠)",
+  "search_mode": "По словам (Быстро ⚡️)",
   "specific_movie": "Все фильмы",
   "t_type": "Фильмы",
   "c_filter": "Наше (RU/SU)",
   "genre_filter": "Comedy",
   "min_rating": 7.0,
-  "pad_start": 30.0,
-  "pad_end": 30.0,
-  "source_pref": "all"
+  "pad_start": 15.0,
+  "pad_end": 15.0,
+  "source_pref": "all",
+  "ai_scenario": "💍 Свадебный (юмор и реакция на 1 слово)"
 }
