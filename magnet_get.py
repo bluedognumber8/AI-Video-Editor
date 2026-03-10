@@ -10,6 +10,7 @@ import time
 import urllib.request
 import socket
 import json
+import re  # <--- ДОБАВЛЕНО ДЛЯ УМНОГО ПОИСКА
 
 try:
     import bencode
@@ -19,6 +20,7 @@ except ImportError:
     except ImportError:
         bencode = None
 
+# --- НАСТРОЙКИ ---
 CONFIG = {
     "rutracker": {
         "username": "mkiisklaa",
@@ -154,7 +156,6 @@ def try_youtube(query, start_time, duration_secs, output_path):
     
     for v in videos:
         if v.get("duration", 0) > req_dur:
-            # ДОБАВЛЕН ЛОГ НАЗВАНИЯ РОЛИКА
             print(f"   🎬 ВЫБРАНО ВИДЕО: {v.get('title', 'Без названия')} (Длительность: {v.get('duration')} сек)")
             return do_stream_download(f"https://www.youtube.com/watch?v={v.get('id')}", start_time, duration_secs, output_path, "youtube")
     print("   Подходящее видео не найдено")
@@ -176,7 +177,6 @@ def try_rutube(query, start_time, duration_secs, output_path):
             video_url = v.get("video_url")
             if video_url:
                 if not video_url.startswith("http"): video_url = "https://rutube.ru" + video_url
-                # ДОБАВЛЕН ЛОГ НАЗВАНИЯ РОЛИКА
                 print(f"   🎬 ВЫБРАНО ВИДЕО: {v.get('title', 'Без названия')} (Длительность: {dur_sec} сек)")
                 return do_stream_download(video_url, start_time, duration_secs, output_path, "rutube")
     print("   Подходящее видео не найдено")
@@ -188,8 +188,10 @@ def get_bencode_val(d, key):
         if isinstance(key, str): return d.get(key.encode("utf-8"))
     return None
 
-def find_episode_index(torrent_path, target_episode):
-    # ТЕПЕРЬ ФУНКЦИЯ ВОЗВРАЩАЕТ (ИНДЕКС_ФАЙЛА, ИМЯ_ФАЙЛА) ДЛЯ ЛОГОВ
+# =====================================================================
+# УМНЫЙ ПАРСЕР ЭПИЗОДОВ ВНУТРИ ТОРРЕНТА
+# =====================================================================
+def find_episode_index(torrent_path, target_season, target_episode):
     if not bencode: return (0, "Неизвестный файл (нет bencode)")
     try:
         with open(torrent_path, "rb") as f: raw = f.read()
@@ -197,14 +199,12 @@ def find_episode_index(torrent_path, target_episode):
         info = get_bencode_val(bencode.decode(raw), "info")
         if not info: return (0, "Пустое info")
         
-        # Если торрент состоит из 1 файла
         files = get_bencode_val(info, "files")
         if not files: 
             name = get_bencode_val(info, "name")
             name_str = name.decode("utf-8", "ignore") if isinstance(name, bytes) else str(name)
             return (0, name_str)
         
-        # Если файлов много (сериал)
         video_files = []
         for idx, f_dict in enumerate(files):
             path_list = get_bencode_val(f_dict, "path")
@@ -213,11 +213,44 @@ def find_episode_index(torrent_path, target_episode):
             if full_name.lower().endswith((".mkv", ".mp4", ".avi", ".ts", ".m4v")): 
                 video_files.append((idx, full_name))
         
-        video_files.sort(key=lambda x: x[1].lower()) # Сортируем по алфавиту
+        if not video_files: return (0, "Видеофайлы не найдены")
+        if target_episode == 0: return video_files[0]
+
+        s_pad = f"{target_season:02d}"
+        e_pad = f"{target_episode:02d}"
+        
+        # 1. Поиск точного совпадения через регулярки (s06e20, 06x20)
+        patterns = [
+            rf"s{s_pad}e{e_pad}",        # s06e20
+            rf"s{target_season}e{e_pad}",# s6e20
+            rf"{s_pad}x{e_pad}",         # 06x20
+            rf"{target_season}x{e_pad}"  # 6x20
+        ]
+        for idx, path in video_files:
+            path_lower = path.lower()
+            for pat in patterns:
+                if re.search(pat, path_lower): return (idx, path)
+
+        # 2. План Б: Ищем папку нужного сезона, а внутри берем N-й файл
+        season_files = []
+        s_folders = [rf"s{s_pad}", rf"season {target_season}", rf"сезон {target_season}"]
+        for idx, path in video_files:
+            path_lower = path.lower()
+            if any(re.search(p, path_lower) for p in s_folders):
+                season_files.append((idx, path))
+                
+        if season_files:
+            season_files.sort(key=lambda x: x[1].lower())
+            if 0 < target_episode <= len(season_files):
+                return season_files[target_episode - 1]
+
+        # 3. План В: Сдаемся и просто сортируем всё (для односезонных торрентов)
+        video_files.sort(key=lambda x: x[1].lower())
         if 0 < target_episode <= len(video_files): return video_files[target_episode - 1]
-        elif video_files: return video_files[0]
-        return (0, "Видеофайлы не найдены")
-    except: return (0, "Ошибка парсинга .torrent")
+        
+        return video_files[0]
+    except Exception as e: 
+        return (0, f"Ошибка парсинга: {e}")
 
 def run_clean_ffmpeg(stream_url, start_time, duration_secs, output_path):
     duration_str = seconds_to_time(duration_secs)
@@ -246,7 +279,8 @@ def evaluate_torrent(title, seeds, size_gb, is_tv):
     score -= int(size_gb * 10)
     return score
 
-def do_torrent_download(topic_id, torrent_title, start_time, duration_secs, output_path, target_episode, session, active_domain):
+# ИЗМЕНЕНИЕ: ДОБАВЛЕН target_season
+def do_torrent_download(topic_id, torrent_title, start_time, duration_secs, output_path, target_season, target_episode, session, active_domain):
     torrent_path = f"temp_{topic_id}_{os.getpid()}.torrent"
     peerflix_process = None
     try:
@@ -258,9 +292,9 @@ def do_torrent_download(topic_id, torrent_title, start_time, duration_secs, outp
 
         if os.path.getsize(torrent_path) < 100: return False
 
-        # ПАРСИМ ТОРРЕНТ И ПОЛУЧАЕМ ИМЯ ФАЙЛА ДЛЯ ЛОГОВ
-        file_index, file_name = find_episode_index(torrent_path, target_episode) if target_episode > 0 else (0, "Неизвестно")
-        print(f"   📂 ВЫБРАН ФАЙЛ (Эпизод {target_episode}): {file_name}")
+        # ПЕРЕДАЕМ СЕЗОН ДЛЯ УМНОГО ПОИСКА
+        file_index, file_name = find_episode_index(torrent_path, target_season, target_episode) if target_episode > 0 else (0, "Неизвестно")
+        print(f"   📂 ВЫБРАН ФАЙЛ (Сезон {target_season} Эпизод {target_episode}): {file_name}")
 
         port = get_free_port()
         stream_url = f"http://127.0.0.1:{port}/"
@@ -298,7 +332,7 @@ def do_torrent_download(topic_id, torrent_title, start_time, duration_secs, outp
             try: os.remove(torrent_path)
             except: pass
 
-def try_torrent(query, start_time, duration_secs, output_path, target_episode, is_tv):
+def try_torrent(query, start_time, duration_secs, output_path, target_season, target_episode, is_tv):
     print(f"\n🔵 [TORRENT] Поиск: '{query}'")
     session, active_domain = ensure_rutracker_session()
     if not session: return False
@@ -326,8 +360,8 @@ def try_torrent(query, start_time, duration_secs, output_path, target_episode, i
     valid_torrents.sort(key=lambda x: x["score"], reverse=True)
 
     for idx, t_info in enumerate(valid_torrents[:3]):
-        # ДОБАВЛЕНА ПЕРЕДАЧА title в do_torrent_download
-        if do_torrent_download(t_info["topic_id"], t_info["title"], start_time, duration_secs, output_path, target_episode, session, active_domain):
+        print(f"   ► Попытка {idx + 1}/3: {t_info['title'][:50]}... (Сидов: {t_info['seeds']})")
+        if do_torrent_download(t_info["topic_id"], t_info["title"], start_time, duration_secs, output_path, target_season, target_episode, session, active_domain):
             return True
     return False
 
@@ -351,6 +385,7 @@ def main():
 
     is_tv = args.type == "tv"
     target_ep = int(args.episode) if is_tv else 0
+    target_season = int(args.season) if is_tv else 0
     
     if args.source == "torrent": sources = ["torrent"]
     elif args.source == "youtube": sources = ["youtube"]
@@ -363,7 +398,7 @@ def main():
     if args.output:
         output_file = args.output
     else:
-        safe_name = f"{args.title}_S{int(args.season):02d}E{target_ep:02d}" if is_tv and int(args.season) > 0 else (f"{args.title}_{args.year}" if int(args.year) > 0 else args.title)
+        safe_name = f"{args.title}_S{target_season:02d}E{target_ep:02d}" if is_tv and target_season > 0 else (f"{args.title}_{args.year}" if int(args.year) > 0 else args.title)
         safe_name = "".join(c for c in safe_name if c.isalnum() or c in " _-").strip().replace(" ", "_")
         output_file = os.path.join(CONFIG["clip"]["output_folder"], f"{safe_name}_clip.mp4")
 
@@ -377,7 +412,7 @@ def main():
             if s_type == "rutube" and do_stream_download(s_id, args.start, args.duration, output_file, "rutube"): sys.exit(0)
             elif s_type == "torrent":
                 session, active_domain = ensure_rutracker_session()
-                if session and do_torrent_download(s_id, "Привязанный торрент", args.start, args.duration, output_file, target_ep, session, active_domain): sys.exit(0)
+                if session and do_torrent_download(s_id, "Привязанный торрент", args.start, args.duration, output_file, target_season, target_ep, session, active_domain): sys.exit(0)
             print("⚠️ Привязанный источник мертв. Запускаем глобальный поиск!")
 
     CONFIG["search"]["priority"] = sources
@@ -389,7 +424,7 @@ def main():
         for query in queries:
             if source == "youtube": success = try_youtube(query, args.start, args.duration, output_file)
             elif source == "rutube": success = try_rutube(query, args.start, args.duration, output_file)
-            elif source == "torrent": success = try_torrent(query, args.start, args.duration, output_file, target_ep, is_tv)
+            elif source == "torrent": success = try_torrent(query, args.start, args.duration, output_file, target_season, target_ep, is_tv)
             if success: break
 
     if success:
