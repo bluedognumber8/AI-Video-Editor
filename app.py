@@ -9,6 +9,7 @@ import sys
 import time
 import json
 import requests
+import gc
 
 # --- ИНИЦИАЛИЗАЦИЯ МОРФОЛОГИИ (NLTK + PYMORPHY3) ---
 try:
@@ -45,14 +46,12 @@ os.makedirs(CLIPS_DIR, exist_ok=True)
 # --- НАСТРОЙКИ OPENROUTER ---
 OPENROUTER_API_KEY = "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"
 
-# Список от самых умных к самым безотказным (танкам)
+# Самые умные и стабильные бесплатные модели
 LLM_MODELS_FALLBACK = [
-    "google/gemini-2.5-flash:free",
     "meta-llama/llama-3.3-70b-instruct:free",         
-    "qwen/qwen-2.5-7b-instruct:free",
-    "gryphe/mythomax-l2-13b:free",     # Танк 1
-    "undi95/toppy-m-7b:free",          # Танк 2
-    "openchat/openchat-7b:free"        # Танк 3
+    "google/gemini-2.5-flash:free",                   
+    "mistralai/mistral-small-24b-instruct-2501:free", 
+    "qwen/qwen-2.5-7b-instruct:free"
 ]
 
 st.set_page_config(page_title="AI-Режиссер Монтажа", page_icon="🎬", layout="wide")
@@ -119,7 +118,7 @@ def on_download_settings_change():
     save_settings({k: st.session_state[k] for k in DEFAULT_SETTINGS if k in st.session_state})
 
 # =====================================================================
-# 🧠 ИИ АГЕНТ (OPENROUTER) - ПАРСИНГ РЕЖИССЕРСКИХ ИДЕЙ
+# 🧠 ИИ АГЕНТ (OPENROUTER)
 # =====================================================================
 def extract_json_from_llm(text):
     try:
@@ -269,7 +268,7 @@ def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific
 
 def perform_search(query_text, search_mode, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, log_widget=None):
     if search_mode == "По словам (Быстро ⚡️)":
-        if log_widget: log_widget.write("⚡ Выполняем точный поиск по базе субтитров...")
+        if log_widget: log_widget.write("⚡ Выполняем поиск по базе субтитров...")
         return _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie)
     else: 
         return _search_ai_agent(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, log_widget)
@@ -278,7 +277,6 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
     try: conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
     except: return []
 
-    # УЛЬТИМАТИВНЫЙ РУССКИЙ ПОИСК С МОРФОЛОГИЕЙ И СТЕММИНГОМ
     search_terms = []
     for word in re.findall(r'\w+', query_text):
         word = word.lower()
@@ -305,7 +303,6 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
     search_query = " AND ".join(search_terms) if search_terms else "*"
     params = [search_query]
 
-    # СУПЕР-ДЕДУПЛИКАЦИЯ: Группировка по фильму + по очищенному тексту (первым 20 буквам)
     sql = f"""
         WITH top_matches AS (SELECT rowid FROM subtitles_fts WHERE text MATCH ? ORDER BY rank LIMIT 2000),
         ranked AS (
@@ -367,7 +364,6 @@ def _search_ai_agent(query_text, limit, offset, min_rating, t_type, country_filt
     if log_widget: log_widget.write("🧹 Фильтруем дубликаты текстов...")
     seen_phrases, final_res = set(), []
     
-    # Python Дедупликация для собранных в кучу результатов ИИ
     for row in sorted(results, key=lambda x: x[1], reverse=True):
         imdb_id = row[0][10]
         text = row[0][9]
@@ -412,7 +408,14 @@ with st.sidebar:
     st.header("✂️ Хронометраж")
     pad_start = st.number_input("Секунд ДО фразы:", 0.0, 120.0, step=5.0, key="pad_start", on_change=on_download_settings_change)
     pad_end = st.number_input("Секунд ПОСЛЕ фразы:", 0.0, 120.0, step=5.0, key="pad_end", on_change=on_download_settings_change)
-    source_pref = st.radio("🌐 Источник:", ["all", "torrent", "youtube"], format_func=lambda x: {"all": "Везде", "torrent": "Только Torrent", "youtube": "Только YouTube"}[x], key="source_pref", on_change=on_download_settings_change)
+    
+    source_pref = st.radio(
+        "🌐 Источник:", 
+        ["all", "youtube", "rutube", "torrent"], 
+        format_func=lambda x: {"all": "Везде (YT -> RuTube -> Tor)", "youtube": "Только YouTube", "rutube": "Только RuTube", "torrent": "Только Torrent"}[x], 
+        key="source_pref", 
+        on_change=on_download_settings_change
+    )
 
 # =====================================================================
 # 📥 МЕНЕДЖЕР ЗАГРУЗОК (ФОНОВЫЕ ЗАДАЧИ)
@@ -434,7 +437,10 @@ if st.session_state.active_downloads:
                             try:
                                 with open(task['log_file'], 'r', encoding='utf-8') as f:
                                     lines = f.readlines()
-                                    if lines: st.code(lines[-1].strip(), language="log")
+                                    if lines: 
+                                        # Берем последние 6 непустых строк лога
+                                        recent_logs = "".join([l for l in lines if l.strip()][-6:])
+                                        st.code(recent_logs, language="log")
                             except: pass
                             
                             if st.button("Остановить ❌", key=f"stop_{task_id}"):
@@ -574,11 +580,8 @@ if st.session_state.search_results:
                     
                     task_id = f"task_{imdb_id}_{int(time.time())}"
                     safe_name = "".join(c for c in f"{title}_{year}" if c.isalnum() or c in " _-").strip().replace(" ", "_")
-                    
-                    # ПАРАЛЛЕЛЬНОСТЬ: Уникальное имя файла
                     expected_file = os.path.join(CLIPS_DIR, f"{safe_name}_{task_id}.mp4")
                     
-                    # ПАРАЛЛЕЛЬНОСТЬ: Передача аргумента --output
                     cmd = [sys.executable, "-u", "magnet_get.py", "--title", str(title), "--orig_title", str(orig_title or ""), 
                            "--year", str(safe_int(year)), "--type", str(m_type), "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), 
                            "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), "--source", source_pref,
@@ -587,7 +590,6 @@ if st.session_state.search_results:
                     if saved_source: cmd.extend(["--force_source", saved_source])
 
                     log_file_path = os.path.join(CLIPS_DIR, f"{task_id}_log.txt")
-                    
                     log_file = open(log_file_path, "w", encoding="utf-8")
                     process = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, text=True)
                     
