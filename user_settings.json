@@ -1,12 +1,12 @@
 {
   "search_mode": "По словам (Быстро ⚡️)",
-  "specific_movie": "Титаник",
+  "specific_movie": "Все фильмы",
   "t_type": "Все",
   "c_filter": "Все",
   "genre_filter": "Любой",
-  "min_rating": 7.0,
-  "pad_start": 5.0,
-  "pad_end": 5.0,
+  "min_rating": 0.0,
+  "pad_start": 20.0,
+  "pad_end": 20.0,
   "source_pref": "torrent",
   "ai_scenario": "🎬 Стандартный (поиск по описанию)"
 }
