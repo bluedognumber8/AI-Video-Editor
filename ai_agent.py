@@ -42,16 +42,47 @@ logger = logging.getLogger(__name__)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 LLM_MODELS_FALLBACK = [
+    # Тир 1: Гениальные гиганты (Лучшее понимание контекста)
     "nousresearch/hermes-3-llama-3.1-405b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-coder:free",
-    "deepseek/deepseek-chat-v3-0324:free",
     "openai/gpt-oss-120b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    
+    # Тир 2: Продвинутые Reasoning-модели (умеют "думать")
+    "deepseek/deepseek-r1:free",
+    "deepseek/deepseek-chat-v3-0324:free",
     "google/gemini-2.5-pro-exp-03-25:free",
+    "deepseek/deepseek-v3-base:free",
+    "deepseek/deepseek-r1-zero:free",
+    
+    # Тир 3: Средний класс и быстрые надежные
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "google/gemma-3-27b-it:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
+    "stepfun/step-3.5-flash:free",
+    "zhipu/glm-4.5-air:free",
+    "meta-llama/llama-4-maverick:free",
+    "meta-llama/llama-4-scout:free",
+    "qwen/qwen3-coder:free",
+    
+    # Тир 4: Маленькие запасные модели
     "google/gemma-3-12b:free",
+    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
+    "nousresearch/deephermes-3-llama-3-8b-preview:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
     "google/gemma-3-4b:free",
-    "meta-llama/llama-3.2-3b-instruct:free"
+    "qwen/qwen2.5-vl-3b-instruct:free",
+    "moonshotai/kimi-vl-a3b-thinking:free",
+    "nvidia/nemotron-nano-2-vl:free",
+    "mistralai/devstral-small:free",
+    
+    # Тир 5: Роутеры (пусть OpenRouter сам решит)
+    "openrouter/hunter-alpha",
+    "openrouter/healer-alpha",
+    "openrouter/optimus-alpha",
+    "openrouter/quasar-alpha",
+    "openrouter/free"
 ]
 
 CACHE_FILE = "last_ai_model.json"
