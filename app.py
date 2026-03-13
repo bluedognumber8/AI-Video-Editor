@@ -468,104 +468,190 @@ with search_container:
     with c_btn:
         if st.button("Найти 🚀", use_container_width=True, type="primary"): trigger_new_search()
 
+
 @auto_updating_fragment
 def render_download_manager():
     cleanup_finished_downloads()
     running_count = count_running_downloads()
 
-    if not st.session_state.active_downloads: return
+    if not st.session_state.active_downloads:
+        return
 
-    with st.expander(f"📥 Менеджер загрузок (Активных: {running_count})", expanded=True):
-        c_btn1, c_btn2, c_btn3 = st.columns([2, 1, 1])
-        with c_btn1:
-            if running_count > 0: st.info("🔄 Автообновление активно (идет скачивание...)")
-            else: st.success("✅ Все задачи завершены")
-        with c_btn2:
-            if st.button("📂 Открыть папку (clips)", use_container_width=True, type="secondary"):
-                abs_path = os.path.abspath(CLIPS_DIR)
-                if sys.platform == "win32": os.startfile(abs_path)
-                elif sys.platform == "darwin": subprocess.Popen(["open", abs_path])
-                else: subprocess.Popen(["xdg-open", abs_path])
-        with c_btn3:
-            if st.button("🗑 Очистить завершенные", use_container_width=True):
-                to_delete = [k for k, v in st.session_state.active_downloads.items() if v['status'] != 'running']
-                for k in to_delete: st.session_state.active_downloads.pop(k, None)
-                st.rerun()
+    st.markdown(f"### 📥 Менеджер загрузок (Активных: {running_count})")
+    
+    c_btn1, c_btn2, c_btn3 = st.columns([2, 1, 1])
+    with c_btn1:
+        if running_count > 0:
+            st.info("🔄 Автообновление активно (идет скачивание...)")
+        else:
+            st.success("✅ Все задачи завершены")
+    with c_btn2:
+        if st.button("📂 Открыть папку (clips)", use_container_width=True, type="secondary"):
+            abs_path = os.path.abspath(CLIPS_DIR)
+            if sys.platform == "win32":
+                os.startfile(abs_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", abs_path])
+            else:
+                subprocess.Popen(["xdg-open", abs_path])
+    with c_btn3:
+        if st.button("🗑 Очистить завершенные", use_container_width=True):
+            to_delete = [k for k, v in st.session_state.active_downloads.items() if v['status'] != 'running']
+            for k in to_delete:
+                st.session_state.active_downloads.pop(k, None)
+            st.rerun()
 
-        st.markdown("---")
-        for idx, (task_id, task) in enumerate(list(st.session_state.active_downloads.items())):
-            with st.container(border=True):
-                st.markdown(f"**{task['title']}**")
-                if 'quote' in task: st.caption(f"🗣️ *«{sanitize_html_text(task['quote'][:40])}...»*")
+    st.markdown("---")
 
-                if task['status'] == 'running':
-                    proc = task.get('process')
-                    if proc and proc.poll() is None:
-                        try:
-                            with open(task['log_file'], 'r', encoding='utf-8') as f:
-                                st.info(get_clean_status_from_log(f.readlines()[-15:]))
-                        except: st.info("⏳ Ожидание логов...")
-                        if st.button("Остановить ❌", key=f"stop_{task_id}", use_container_width=True):
-                            proc.terminate()
-                            task['status'] = 'stopped'
-                            st.rerun()
-                    else:
-                        if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024: task['status'] = 'success'
-                        else: task['status'] = 'error'
-                        st.rerun()
-                elif task['status'] == 'success':
-                    st.success("✅ Сохранено!")
-                    try:
-                        c_vid, c_btns = st.columns([3, 1])
-                        with c_vid: st.video(task['file_path'])
-                        with c_btns:
-                            with open(task['file_path'], "rb") as file:
-                                st.download_button("💾 Скачать MP4", data=file, file_name=os.path.basename(task['file_path']), mime="video/mp4", key=f"dl_{task_id}", use_container_width=True)
-                            if st.button("Убрать из списка ✖", key=f"clr_{task_id}", use_container_width=True):
-                                st.session_state.active_downloads.pop(task_id, None); st.rerun()
-                    except: st.error("Файл не найден")
+    for idx, (task_id, task) in enumerate(list(st.session_state.active_downloads.items())):
+        # Determine status icon for the accordion label
+        if task['status'] == 'running':
+            proc = task.get('process')
+            if proc and proc.poll() is None:
+                status_icon = "⏳"
+                # Get a short status snippet for the label
+                try:
+                    with open(task['log_file'], 'r', encoding='utf-8') as f:
+                        short_status = get_clean_status_from_log(f.readlines()[-15:])
+                except:
+                    short_status = "В процессе..."
+            else:
+                # Process finished but status not yet updated
+                if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024:
+                    task['status'] = 'success'
+                    status_icon = "✅"
+                    short_status = "Готово!"
                 else:
-                    st.error("❌ Ошибка")
-                    if st.button("Убрать ✖", key=f"clr_{task_id}", use_container_width=True):
-                        st.session_state.active_downloads.pop(task_id, None); st.rerun()
+                    task['status'] = 'error'
+                    status_icon = "❌"
+                    short_status = "Ошибка"
+        elif task['status'] == 'success':
+            status_icon = "✅"
+            short_status = "Сохранено"
+        elif task['status'] == 'stopped':
+            status_icon = "⏹️"
+            short_status = "Остановлено"
+        else:
+            status_icon = "❌"
+            short_status = "Ошибка"
 
-                # ТРАНСКРИПЦИЯ ±15 минут для быстрого рестарта
-                with st.expander("📜 Транскрипция (±15 мин) и Корректировка Рассинхрона"):
-                    q_filter = st.text_input("🔍 Локальный поиск (Ctrl+F):", key=f"dl_search_{task_id}", placeholder="Начните вводить текст, чтобы отфильтровать список...")
-                    subs = get_wide_context(task['imdb_id'], task['orig_start_sec'], window_sec=900)
-                    
-                    if q_filter: subs = [s for s in subs if q_filter.lower() in s['text'].lower()]
-                    
-                    with st.container(height=250):
-                        for s in subs:
-                            prefix = "🎯 " if abs(s['sec'] - task['orig_start_sec']) < 2 else "⏱ "
-                            if st.button(f"{prefix}[{s['time_str']}] {s['text']}", key=f"fix_dl_{task_id}_{s['id']}", use_container_width=True, type="secondary" if "🎯" in prefix else "tertiary"):
-                                
-                                # 1. Вычисляем и сохраняем новый оффсет
-                                new_offset = task['orig_start_sec'] - s['sec']
-                                save_source_info(task['imdb_id'], task['saved_source'] or "", new_offset)
-                                
-                                # 2. Убиваем текущий процесс, если он висит
-                                if task['status'] == 'running' and task.get('process') and task['process'].poll() is None:
-                                    task['process'].terminate()
-                                    
-                                # 3. Рассчитываем новые тайминги
-                                start_sec = max(0, task['orig_start_sec'] - task['pad_start'] + new_offset)
-                                duration = max(1, (task['orig_end_sec'] + task['pad_end'] + new_offset) - start_sec)
-                                
-                                # 4. Запускаем по новой
-                                cmd = [sys.executable, "-u", "magnet_get.py", "--title", str(task['title_raw']), "--orig_title", str(task['orig_title'] or ""), "--year", str(safe_int(task['year'])), "--type", str(task['m_type']), "--season", str(safe_int(task['season'])), "--episode", str(safe_int(task['ep'])), "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), "--source", task['source_pref'], "--output", task['file_path']]
-                                if task['saved_source']: cmd.extend(["--force_source", task['saved_source']])
-                                
-                                log_handle = open(task['log_file'], "w", encoding="utf-8")
-                                new_proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, text=True, env=os.environ.copy())
-                                
-                                task['process'] = new_proc
-                                task['_log_handle'] = log_handle
-                                task['status'] = 'running'
-                                st.success(f"✅ Смещение обновлено ({new_offset:.1f} сек). Запущен рестарт!")
-                                time.sleep(1)
-                                st.rerun()
+        # Build the accordion label with icon + title + short status
+        quote_preview = f" — «{sanitize_html_text(task.get('quote', '')[:30])}...»" if task.get('quote') else ""
+        accordion_label = f"{status_icon} {task['title']}{quote_preview} | {short_status}"
+
+        # Accordion is expanded only for running tasks
+        with st.expander(accordion_label, expanded=(task['status'] == 'running')):
+            if task['status'] == 'running':
+                proc = task.get('process')
+                if proc and proc.poll() is None:
+                    try:
+                        with open(task['log_file'], 'r', encoding='utf-8') as f:
+                            st.info(get_clean_status_from_log(f.readlines()[-15:]))
+                    except:
+                        st.info("⏳ Ожидание логов...")
+                    if st.button("Остановить ❌", key=f"stop_{task_id}", use_container_width=True):
+                        proc.terminate()
+                        task['status'] = 'stopped'
+                        st.rerun()
+                else:
+                    if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024:
+                        task['status'] = 'success'
+                    else:
+                        task['status'] = 'error'
+                    st.rerun()
+
+            elif task['status'] == 'success':
+                st.success("✅ Сохранено!")
+                try:
+                    st.video(task['file_path'])
+                    c_dl, c_rm = st.columns(2)
+                    with c_dl:
+                        with open(task['file_path'], "rb") as file:
+                            st.download_button(
+                                "💾 Скачать MP4", data=file,
+                                file_name=os.path.basename(task['file_path']),
+                                mime="video/mp4", key=f"dl_{task_id}",
+                                use_container_width=True
+                            )
+                    with c_rm:
+                        if st.button("Убрать из списка ✖", key=f"clr_{task_id}", use_container_width=True):
+                            st.session_state.active_downloads.pop(task_id, None)
+                            st.rerun()
+                except:
+                    st.error("Файл не найден")
+
+            elif task['status'] == 'stopped':
+                st.warning("⏹️ Загрузка остановлена пользователем.")
+                if st.button("Убрать ✖", key=f"clr_{task_id}", use_container_width=True):
+                    st.session_state.active_downloads.pop(task_id, None)
+                    st.rerun()
+
+            else:  # error
+                st.error("❌ Ошибка загрузки")
+                if st.button("Убрать ✖", key=f"clr_{task_id}", use_container_width=True):
+                    st.session_state.active_downloads.pop(task_id, None)
+                    st.rerun()
+
+            # Transcription & resync section inside each download accordion
+            with st.expander("📜 Транскрипция (±15 мин) и Корректировка Рассинхрона"):
+                q_filter = st.text_input(
+                    "🔍 Локальный поиск (Ctrl+F):", key=f"dl_search_{task_id}",
+                    placeholder="Начните вводить текст, чтобы отфильтровать список..."
+                )
+                subs = get_wide_context(task['imdb_id'], task['orig_start_sec'], window_sec=900)
+
+                if q_filter:
+                    subs = [s for s in subs if q_filter.lower() in s['text'].lower()]
+
+                with st.container(height=250):
+                    for s in subs:
+                        prefix = "🎯 " if abs(s['sec'] - task['orig_start_sec']) < 2 else "⏱ "
+                        if st.button(
+                            f"{prefix}[{s['time_str']}] {s['text']}",
+                            key=f"fix_dl_{task_id}_{s['id']}",
+                            use_container_width=True,
+                            type="secondary" if "🎯" in prefix else "tertiary"
+                        ):
+                            new_offset = task['orig_start_sec'] - s['sec']
+                            save_source_info(task['imdb_id'], task.get('saved_source') or "", new_offset)
+
+                            if task['status'] == 'running' and task.get('process') and task['process'].poll() is None:
+                                task['process'].terminate()
+
+                            # 3. Рассчитываем новые тайминги (+ 10 сек запас до фразы)
+                            SAFETY_BUFFER = 10.0
+                            start_sec = max(0, task['orig_start_sec'] - task['pad_start'] - SAFETY_BUFFER + new_offset)
+                            duration = max(1, (task['orig_end_sec'] + task['pad_end'] + new_offset) - start_sec)
+
+                            cmd = [
+                                sys.executable, "-u", "magnet_get.py",
+                                "--title", str(task['title_raw']),
+                                "--orig_title", str(task.get('orig_title') or ""),
+                                "--year", str(safe_int(task['year'])),
+                                "--type", str(task['m_type']),
+                                "--season", str(safe_int(task['season'])),
+                                "--episode", str(safe_int(task['ep'])),
+                                "--start", seconds_to_hms(start_sec),
+                                "--duration", str(int(duration)),
+                                "--source", task['source_pref'],
+                                "--output", task['file_path']
+                            ]
+                            if task.get('saved_source'):
+                                cmd.extend(["--force_source", task['saved_source']])
+
+                            log_handle = open(task['log_file'], "w", encoding="utf-8")
+                            new_proc = subprocess.Popen(
+                                cmd, stdout=log_handle, stderr=subprocess.STDOUT,
+                                text=True, env=os.environ.copy()
+                            )
+
+                            task['process'] = new_proc
+                            task['_log_handle'] = log_handle
+                            task['status'] = 'running'
+                            st.success(f"✅ Смещение обновлено ({new_offset:.1f} сек). Запущен рестарт!")
+                            time.sleep(1)
+                            st.rerun()
+
 
 render_download_manager()
 

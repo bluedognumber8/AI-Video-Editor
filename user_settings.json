@@ -1,11 +1,11 @@
 {
   "search_mode": "По словам (Быстро ⚡️)",
   "specific_movie": "Все фильмы",
-  "t_type": "Фильмы",
-  "c_filter": "Наше (RU/SU)",
+  "t_type": "Все",
+  "c_filter": "Все",
   "genre_filter": "Любой",
-  "min_rating": 6.5,
-  "pad_start": 20.0,
-  "pad_end": 20.0,
+  "min_rating": 7.0,
+  "pad_start": 30.0,
+  "pad_end": 30.0,
   "source_pref": "torrent"
 }
