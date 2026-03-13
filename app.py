@@ -53,9 +53,39 @@ MAX_ACTIVE_DOWNLOADS = 5
 os.makedirs(CLIPS_DIR, exist_ok=True)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-LLM_MODELS_FALLBACK = ["meta-llama/llama-3.3-70b-instruct:free", "google/gemini-2.5-flash:free", "mistralai/mistral-small-24b-instruct-2501:free"]
+# Обновленный список бесплатных моделей по вашему списку (от лучших к запасным)
+LLM_MODELS_FALLBACK = [
+    "nousresearch/hermes-3-llama-3.1-405b:free",
+    "google/gemma-3-12b:free",
+    "google/gemma-3-4b:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "google/gemini-2.5-flash:free",
+    "venice/venice-uncensored:free"
+]
 
 st.set_page_config(page_title="AI-Режиссер Монтажа", page_icon="🎬", layout="wide")
+
+# =====================================================================
+# 🎨 CSS ХАКИ ДЛЯ STICKY ПОИСКА И КРАСОТЫ
+# Вставляем стили скрыто, чтобы они не ломали порядок блоков
+# =====================================================================
+st.markdown("""
+    <style>
+        /* Делаем ПЕРВЫЙ блок в главном контейнере прилипающим (это будет наша панель поиска) */
+        .main .block-container > div[data-testid="stVerticalBlock"] > div:first-child {
+            position: sticky;
+            top: 2.875rem; /* Отступ под системную шапку Streamlit */
+            background-color: var(--primary-background-color);
+            z-index: 999;
+            padding-top: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(128,128,128, 0.2);
+            margin-bottom: 15px;
+        }
+        /* Убираем лишние отступы у кнопок в поиске */
+        .stButton button { margin-top: 0px; }
+    </style>
+""", unsafe_allow_html=True)
 
 SearchRow = namedtuple('SearchRow', ['title_ru', 'year', 'genres', 'rating', 'type', 'season', 'episode', 'start_time', 'end_time', 'text', 'imdb_id', 'countries', 'title_original', 'sub_id'])
 
@@ -307,18 +337,15 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
         cursor = conn.cursor()
     except: return []
 
-    # Умные кавычки: если юзер сам написал в кавычках - включаем точный поиск
     if query_text.startswith('"') and query_text.endswith('"'):
         exact_match = True
         query_text = query_text.strip('"')
 
     if exact_match:
-        # Для точного совпадения чистим запрос и оборачиваем в двойные кавычки
         clean_q = re.sub(r'[^\w\s]', '', query_text).strip()
         if not clean_q: return []
         search_query = f'"{clean_q}"'
     else:
-        # Морфологический поиск (разбиваем на слова)
         search_terms = []
         for word in re.findall(r'\w+', query_text):
             word = word.lower()
@@ -373,10 +400,11 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
     finally: conn.close()
 
 def extract_json_from_llm(text):
+    text = re.sub(r'```[a-zA-Z]*\n?', '', text)
+    text = re.sub(r'```\n?', '', text)
     try:
-        start = text.find('[')
-        end = text.rfind(']') + 1
-        if start != -1 and end != -1: return json.loads(text[start:end])
+        match = re.search(r'\[\s*\{.*\}\s*\]', text, re.DOTALL)
+        if match: return json.loads(match.group(0))
     except: pass
     return []
 
@@ -385,31 +413,52 @@ def call_openrouter(system_prompt, user_prompt, log_widget=None):
         if log_widget: log_widget.error("❌ OPENROUTER_API_KEY не задан.")
         return None
 
-    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    # Обязательные заголовки для бесплатных моделей
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}", 
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/ai-director",
+        "X-Title": "AI Director"
+    }
+    
     combined_prompt = f"ИНСТРУКЦИЯ:\n{system_prompt}\n\nЗАДАЧА:\n{user_prompt}"
 
     for model in LLM_MODELS_FALLBACK:
-        if log_widget: log_widget.write(f"⏳ Думает ИИ: `{model}`...")
+        if log_widget: log_widget.write(f"⏳ Пробуем ИИ: `{model}`...")
         try:
             payload = json.dumps({"model": model, "messages": [{"role": "user", "content": combined_prompt}], "temperature": 0.5})
-            resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=payload, timeout=15)
+            resp = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, data=payload, timeout=20)
             if resp.status_code == 200:
                 if log_widget: log_widget.write(f"✅ Успешно ({model})!")
                 return resp.json()['choices'][0]['message']['content'].strip()
-            elif resp.status_code == 429: time.sleep(2)
-        except: continue
+            elif resp.status_code == 429: 
+                if log_widget: log_widget.write("⚠️ Лимит запросов (429), ждем 2 сек...")
+                time.sleep(2)
+            else:
+                if log_widget: log_widget.write(f"⚠️ Ошибка сервера: {resp.status_code}")
+        except Exception as e:
+            if log_widget: log_widget.write(f"⚠️ Сетевая ошибка: {str(e)}")
+            continue
+            
+    if log_widget: log_widget.error("❌ Все ИИ модели недоступны.")
     return None
 
 def _search_ai_agent(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match, log_widget=None):
     if offset == 0:
         scenario = st.session_state.get("ai_scenario", "🎬 Стандартный")
         if "Свадебный" in scenario:
-            system_p = "Ты гениальный комедийный режиссер видеомонтажа. Гость на свадьбе говорит ОДНО слово (пожелание). Придумай 3 смешные, абсурдные или легендарные цитаты из известного кино (СССР/Россия), которые станут идеальной реакцией на это слово.\nОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (массив из 3 объектов):\n[{\"quote\": \"цитата\", \"movie\": \"фильм\", \"reasoning\": \"задумка\"}]"
+            system_p = "Ты гениальный комедийный режиссер видеомонтажа. Гость на свадьбе говорит ОДНО слово (пожелание). Придумай 3 смешные, абсурдные или легендарные цитаты из известного кино (СССР/Россия), которые станут идеальной реакцией на это слово.\nОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (массив из 3 объектов, без форматирования кода):\n[{\"quote\": \"цитата\", \"movie\": \"фильм\", \"reasoning\": \"задумка\"}]"
         else:
-            system_p = "Ты режиссер. Пользователь описывает сцену. Придумай 3 короткие фразы.\nОТВЕТЬ СТРОГО В ФОРМАТЕ JSON:\n[{\"quote\": \"цитата\", \"movie\": \"жанр\", \"reasoning\": \"почему\"}]"
+            system_p = "Ты режиссер. Пользователь описывает сцену. Придумай 3 короткие фразы.\nОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (массив из 3 объектов, без форматирования кода):\n[{\"quote\": \"цитата\", \"movie\": \"жанр\", \"reasoning\": \"почему\"}]"
         
         llm_response = call_openrouter(system_p, f"Запрос: {query_text}", log_widget)
-        st.session_state.llm_ideas = extract_json_from_llm(llm_response) if llm_response else []
+        if llm_response:
+            st.session_state.llm_ideas = extract_json_from_llm(llm_response)
+            # ВАЖНО: Если ИИ выдал текст, но не JSON - показываем этот текст юзеру!
+            if not st.session_state.llm_ideas and log_widget:
+                log_widget.error(f"❌ ИИ ответил текстом, а не JSON:\n\n{llm_response}")
+        else:
+            st.session_state.llm_ideas = []
 
     results = []
     if getattr(st.session_state, 'llm_ideas', []):
@@ -418,7 +467,7 @@ def _search_ai_agent(query_text, limit, offset, min_rating, t_type, country_filt
             if idea.get('quote'):
                 results.extend(_search_fts(idea['quote'], limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match))
     else:
-        if log_widget: log_widget.write("⚠️ ИИ не смог выдать данные. Точный поиск...")
+        if log_widget: log_widget.write("⚠️ ИИ не сработал. Переходим к прямому поиску...")
         results = _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match)
 
     seen_phrases, final_res = set(), []
@@ -493,7 +542,21 @@ with st.sidebar:
     source_pref = st.radio("🌐 Источник:", ["all", "youtube", "rutube", "torrent"], format_func=lambda x: {"all": "Везде (YT -> Tor)", "youtube": "Только YT", "rutube": "Только RuTube", "torrent": "Только Torrent (TorrServer ⚡️)"}[x], key="source_pref", on_change=on_download_settings_change)
 
 # =====================================================================
-# 📥 РЕНДЕР МЕНЕДЖЕРА ЗАГРУЗОК (ЖИВОЙ ФРАГМЕНТ)
+# ГЛАВНЫЙ ЭКРАН - 1. СТРОКА ПОИСКА (БЛОК 1)
+# =====================================================================
+# Этот блок визуально первый в main container, к нему применятся стили sticky top
+search_container = st.container()
+with search_container:
+    c_search, c_opt, c_btn = st.columns([5, 2, 1])
+    with c_search:
+        st.text_input("🔍 Поиск фрагмента:", placeholder="Введите цитату (для точной фразы используйте кавычки \"\")", key="search_query_input", on_change=trigger_new_search, label_visibility="collapsed")
+    with c_opt:
+        st.checkbox("🎯 Точная фраза", key="exact_match_checkbox", on_change=trigger_new_search)
+    with c_btn:
+        if st.button("Найти 🚀", use_container_width=True, type="primary"): trigger_new_search()
+
+# =====================================================================
+# 📥 РЕНДЕР МЕНЕДЖЕРА ЗАГРУЗОК (БЛОК 2 - ЖИВОЙ ФРАГМЕНТ)
 # =====================================================================
 @auto_updating_fragment
 def render_download_manager():
@@ -516,7 +579,7 @@ def render_download_manager():
                 else: subprocess.Popen(["xdg-open", abs_path])
         with c_btn3:
             if st.button("🗑 Очистить завершенные", use_container_width=True):
-                # БЕЗОПАСНОЕ УДАЛЕНИЕ без призраков
+                # БЕЗОПАСНОЕ УДАЛЕНИЕ
                 to_delete = [k for k, v in st.session_state.active_downloads.items() if v['status'] != 'running']
                 for k in to_delete: st.session_state.active_downloads.pop(k, None)
                 st.rerun()
@@ -553,7 +616,7 @@ def render_download_manager():
                             c_dl, c_del = st.columns(2)
                             with c_dl:
                                 with open(task['file_path'], "rb") as file:
-                                    st.download_button("��", data=file, file_name=os.path.basename(task['file_path']), mime="video/mp4", key=f"dl_{task_id}", use_container_width=True)
+                                    st.download_button("💾", data=file, file_name=os.path.basename(task['file_path']), mime="video/mp4", key=f"dl_{task_id}", use_container_width=True)
                             with c_del:
                                 if st.button("Убрать ✖", key=f"clr_{task_id}", use_container_width=True):
                                     st.session_state.active_downloads.pop(task_id, None)
@@ -567,11 +630,11 @@ def render_download_manager():
 
 render_download_manager()
 
+
 # =====================================================================
-# РЕНДЕР КАРТОЧКИ ФИЛЬМА (УНИВЕРСАЛЬНЫЙ ДЛЯ ПОИСКА И ИЗБРАННОГО)
+# РЕНДЕР КАРТОЧКИ ФИЛЬМА (БЛОК 3)
 # =====================================================================
 def render_result_card(row, uid, list_type="search"):
-    # Используем uid (imdb_id + sub_id) вместо индекса, чтобы элементы UI не путались при пагинации!
     title, year, genres, rating, m_type, season, ep, start_srt, end_srt, text, imdb_id, countries, orig_title, s_id = row
     
     imdb_link = f"https://www.imdb.com/title/{imdb_id}/" if imdb_id else "#"
@@ -580,7 +643,6 @@ def render_result_card(row, uid, list_type="search"):
     text_escaped = sanitize_html_text(str(text))
     text_html = text_escaped
     
-    # Подсветка текста (точная фраза или отдельные слова)
     q = st.session_state.last_query
     if q:
         is_exact = st.session_state.get("exact_match_checkbox", False) or (q.startswith('"') and q.endswith('"'))
@@ -628,7 +690,7 @@ def render_result_card(row, uid, list_type="search"):
 
         with c_tools:
             with st.expander("🛠 Рассинхрон? (Умная подгонка)"):
-                st.markdown("<span style='font-size:13px'>Услышали другую фразу в видео? Введите её здесь и кликните по результату:</span>", unsafe_allow_html=True)
+                st.markdown("<span style='font-size:13px'>Услышали другую фразу в скачанном видео? Введите её здесь и кликните по результату:</span>", unsafe_allow_html=True)
                 heard_phrase = st.text_input("🔍 Поиск по фильму:", placeholder="Введите слово...", key=f"live_sync_{list_type}_{uid}")
                 
                 target_sec = srt_to_seconds(start_srt)
@@ -704,21 +766,11 @@ def render_result_card(row, uid, list_type="search"):
                         "log_file": log_file_path, "_log_handle": log_file_handle, "status": "running"
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
-                    # Молча добавляем, не скроллим страницу вверх
+
 
 # =====================================================================
-# ГЛАВНЫЙ ЭКРАН (ТАБЫ И ПОИСК)
+# ВЫВОД РЕЗУЛЬТАТОВ (БЛОК 4)
 # =====================================================================
-
-# БЛОК ПОИСКА В ОДИН РЯД
-c_search, c_opt, c_btn = st.columns([5, 2, 1])
-with c_search:
-    st.text_input("🔍 Поиск фрагмента:", placeholder="Введите цитату (для точной фразы используйте кавычки \"\")", key="search_query_input", on_change=trigger_new_search, label_visibility="collapsed")
-with c_opt:
-    st.checkbox("🎯 Точная фраза", key="exact_match_checkbox", on_change=trigger_new_search)
-with c_btn:
-    if st.button("Найти 🚀", use_container_width=True, type="primary"): trigger_new_search()
-
 tab_search, tab_favs = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное"])
 
 with tab_search:
@@ -745,7 +797,6 @@ with tab_search:
     if st.session_state.search_results:
         st.success(f"Показана страница {st.session_state.search_offset // RESULTS_PER_PAGE + 1}")
         for i, (row, sim) in enumerate(st.session_state.search_results):
-            # Генерируем стабильный UID для сохранения состояния UI (чтобы окна не путались)
             uid = f"{row.imdb_id}_{row.sub_id}"
             render_result_card(row, uid, list_type="search")
 
