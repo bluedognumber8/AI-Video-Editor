@@ -2,11 +2,11 @@
   "search_mode": "По словам (Быстро ⚡️)",
   "specific_movie": "Все фильмы",
   "t_type": "Фильмы",
-  "c_filter": "Наше (RU/SU)",
-  "genre_filter": "Любой",
-  "min_rating": 5.1,
+  "c_filter": "Зарубежное",
+  "genre_filter": "Horror",
+  "min_rating": 7.6,
   "pad_start": 15.0,
   "pad_end": 15.0,
-  "source_pref": "all",
+  "source_pref": "torrent",
   "ai_scenario": "💍 Свадебный (юмор и реакция на 1 слово)"
 }
