@@ -1,0 +1,29 @@
+=========== START ===========
+TorrServer MatriX.141, go1.26.0, CPU Num: 16
+2026/03/13 09:32:14 System DNS check passed
+2026/03/13 09:32:14 DNS resolution successful, addresses: [3.174.230.87 3.174.230.63 3.174.230.128 3.174.230.34 2600:9000:290c:5400:e:5373:440:93a1 2600:9000:290c:7a00:e:5373:440:93a1 2600:9000:290c:4c00:e:5373:440:93a1 2600:9000:290c:6800:e:5373:440:93a1 2600:9000:290c:1200:e:5373:440:93a1 2600:9000:290c:6200:e:5373:440:93a1 2600:9000:290c:7000:e:5373:440:93a1 2600:9000:290c:1c00:e:5373:440:93a1]
+2026/03/13 09:32:14 No migration needed for Settings/BitTorr (already exists or no data)
+2026/03/13 09:32:14 Viewed migration result: 0 migrated, 0 skipped
+2026/03/13 09:32:14 XPathDBRouter: Registered new DB "JsonDB", total 1 DBs registered
+2026/03/13 09:32:14 XPathDBRouter: Registered new route "default" for DB "JsonDB", total 1 routes
+2026/03/13 09:32:14 XPathDBRouter: Registered new route "settings" for DB "JsonDB", total 2 routes
+2026/03/13 09:32:14 XPathDBRouter: Registered new DB "TDB", total 2 DBs registered
+2026/03/13 09:32:14 XPathDBRouter: Registered new route "viewed" for DB "TDB", total 3 routes
+2026/03/13 09:32:14 XPathDBRouter: Registered new route "torrents" for DB "TDB", total 4 routes
+2026/03/13 09:32:14 Storage: Settings->JSON, Viewed->BBolt, Torrents->BBolt
+2026/03/13 09:32:14 Check web port 58521
+2026/03/13 09:32:14 Start TorrServer MatriX.141 torrent v1.2.22
+2026/03/13 09:32:14 Local IPs: [10.8.0.1 172.17.0.1 172.18.0.1 192.168.88.11 192.168.88.238]
+2026/03/13 09:32:14 Set listen port to random autoselect (0)
+2026/03/13 09:32:14 Client config: {"CacheSize":67108864,"ReaderReadAHead":95,"PreloadCache":50,"UseDisk":false,"TorrentsSavePath":"","RemoveCacheOnDrop":false,"ForceEncrypt":false,"RetrackersMode":1,"TorrentDisconnectTimeout":30,"EnableDebug":false,"EnableDLNA":false,"FriendlyName":"","EnableRutorSearch":false,"EnableTorznabSearch":false,"TorznabUrls":null,"TMDBSettings":{"APIKey":"","APIURL":"https://api.themoviedb.org","ImageURL":"https://image.tmdb.org","ImageURLRu":"https://imagetmdb.com"},"EnableIPv6":false,"DisableTCP":false,"DisableUTP":false,"DisableUPNP":false,"DisableDHT":false,"DisablePEX":false,"DisableUpload":false,"DownloadRateLimit":0,"UploadRateLimit":0,"ConnectionsLimit":25,"PeersListenPort":0,"SslPort":0,"SslCert":"","SslKey":"","ResponsiveMode":true,"ShowFSActiveTorr":true,"StoreSettingsInJson":true,"StoreViewedInJson":false,"EnableProxy":false,"ProxyHosts":["*themoviedb.org","*tmdb.org","rutor.info"]}
+2026/03/13 09:32:14 PublicIp4: 178.214.246.23
+2026/03/13 09:32:14 Start http server at :58521
+2026/03/13 09:32:15 add .torrent file
+2026/03/13 09:32:15 Create cache for: Матрица (1999) HDTVRip-AVC [Open Matte].mkv b287ad8d8eb741623eabca5a1e30171432037d36
+2026/03/13 09:32:15 save to db: b287ad8d8eb741623eabca5a1e30171432037d36
+[2026-03-13 09:32:30 +0500 NIL github.com/anacrolix/torrent client.go:321]
+  msg="dht server on 0.0.0.0:41761 (node id 600224d9d5ee3ab363178e04ad592cd032a8e9c2) completed bootstrap ({47 27})"
+2026/03/13 09:33:14 Signal catched: terminated stopping server...
+2026/03/13 09:33:14 Close cache for: Матрица (1999) HDTVRip-AVC [Open Matte].mkv b287ad8d8eb741623eabca5a1e30171432037d36
+2026/03/13 09:33:14 Server stopped gracefully
+2026/03/13 09:33:14 

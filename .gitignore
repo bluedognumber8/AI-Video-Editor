@@ -23,3 +23,7 @@ dbs
 *.db
 *.gz
 chroma_db
+.env
+.streamlit/secrets.toml
+rutracker_cookies.json
+*.pkl
