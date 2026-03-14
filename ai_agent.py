@@ -1,29 +1,3 @@
-# ai_agent.py
-"""
-========================================================================================
-ТЗ И АРХИТЕКТУРА ИИ-ПАЙПЛАЙНА: "ДВУХЭТАПНЫЙ RAG (Retrieval-Augmented Generation)"
-========================================================================================
-Стратегия решения проблемы "Слепого ИИ", который не имеет прямого доступа к базе данных.
-
-ШАГ 1: QUERY EXPANSION (Расширение запроса)
-- Пользователь вводит контекст: "Человек радуется победе".
-- ИИ (в роли переводчика) генерирует 5-10 коротких бытовых фраз или тегов, 
-  которые реально могут встретиться в .srt файлах (например: "Ура!", "Мы сделали это", "Да!").
-
-ШАГ 2: RETRIEVAL (Слепой поиск) - выполняется в app.py
-- SQLite FTS (Full-Text Search) ищет эти фразы в базе за 10 мс.
-- Получаем сырой список из 30-50 потенциальных совпадений (среди которых много мусора).
-
-ШАГ 3: LLM AS A JUDGE (ИИ-Отборщик)
-- Мы формируем компактный список найденных сцен (ID + Жанр + Текст) и отправляем обратно ИИ.
-- ИИ "читает" субтитры, понимает контекст и выбирает ТОП-5 сцен, которые идеально
-  соответствуют изначальному запросу пользователя.
-- ИИ возвращает массив ID лучших сцен [12, 4, 1].
-
-РЕЗУЛЬТАТ: Пользователь видит только самые точные и релевантные сцены.
-========================================================================================
-"""
-# ai_agent.py
 import os
 import json
 import re
@@ -42,21 +16,16 @@ logger = logging.getLogger(__name__)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 LLM_MODELS_FALLBACK = [
-    # Тир 1: Гениальные гиганты (Лучшее понимание контекста)
     "nousresearch/hermes-3-llama-3.1-405b:free",
     "openai/gpt-oss-120b:free",
     "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "qwen/qwen3-next-80b-a3b-instruct:free",
-    
-    # Тир 2: Продвинутые Reasoning-модели (умеют "думать")
     "deepseek/deepseek-r1:free",
     "deepseek/deepseek-chat-v3-0324:free",
     "google/gemini-2.5-pro-exp-03-25:free",
     "deepseek/deepseek-v3-base:free",
     "deepseek/deepseek-r1-zero:free",
-    
-    # Тир 3: Средний класс и быстрые надежные
     "nvidia/nemotron-3-nano-30b-a3b:free",
     "google/gemma-3-27b-it:free",
     "mistralai/mistral-small-3.1-24b-instruct:free",
@@ -65,27 +34,53 @@ LLM_MODELS_FALLBACK = [
     "meta-llama/llama-4-maverick:free",
     "meta-llama/llama-4-scout:free",
     "qwen/qwen3-coder:free",
-    
-    # Тир 4: Маленькие запасные модели
-    "google/gemma-3-12b:free",
-    "nvidia/llama-3.1-nemotron-nano-8b-v1:free",
-    "nousresearch/deephermes-3-llama-3-8b-preview:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "google/gemma-3-4b:free",
-    "qwen/qwen2.5-vl-3b-instruct:free",
-    "moonshotai/kimi-vl-a3b-thinking:free",
-    "nvidia/nemotron-nano-2-vl:free",
-    "mistralai/devstral-small:free",
-    
-    # Тир 5: Роутеры (пусть OpenRouter сам решит)
-    "openrouter/hunter-alpha",
-    "openrouter/healer-alpha",
-    "openrouter/optimus-alpha",
-    "openrouter/quasar-alpha",
-    "openrouter/free"
+    "openrouter/auto"
 ]
 
 CACHE_FILE = "last_ai_model.json"
+PROMPTS_FILE = "prompts_history.json"
+
+# ==========================================
+# СИСТЕМА УПРАВЛЕНИЯ ПРОМПТАМИ
+# ==========================================
+
+DEFAULT_PROMPT = """Ты эксперт по поиску в базе кино-субтитров.
+Пользователь описывает сцену. Твоя задача сгенерировать 6-8 КОРОТКИХ фраз (1-3 слова), которые актеры РЕАЛЬНО произносят в такой ситуации.
+Правила:
+1. Используй короткие бытовые фразы ("что за", "вот блин", "ха ха", "поехали").
+2. Используй теги субтитров в скобках, если это действие ("[смеется]", "[чихает]", "[плачет]").
+3. Никаких длинных описаний!"""
+
+JSON_INSTRUCTION_SUFFIX = """
+
+ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (Массив строк). БЕЗ МАРКДАУНА, БЕЗ ПОЯСНЕНИЙ:
+["фраза 1", "фраза 2", "фраза 3"]"""
+
+def load_prompts():
+    """Загружает историю промптов или создает дефолтную"""
+    if os.path.exists(PROMPTS_FILE):
+        try:
+            with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: pass
+    return {"current": "Базовый (По умолчанию)", "history": {"Базовый (По умолчанию)": DEFAULT_PROMPT}}
+
+def save_prompts(data):
+    """Сохраняет историю промптов"""
+    try:
+        with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except: pass
+
+def get_active_prompt():
+    """Возвращает текущий активный промпт без JSON суффикса"""
+    data = load_prompts()
+    curr = data.get("current", "Базовый (По умолчанию)")
+    return data.get("history", {}).get(curr, DEFAULT_PROMPT)
+
+# ==========================================
+# ОСНОВНОЙ КОД API
+# ==========================================
 
 def get_best_model_order():
     models = LLM_MODELS_FALLBACK.copy()
@@ -152,14 +147,11 @@ def call_openrouter(system_prompt, user_prompt, log_widget=None):
 
 def generate_search_queries(query_text, log_widget=None):
     widget = log_widget if log_widget else DummyWidget()
-    system_p = """Ты эксперт по поиску в базе кино-субтитров.
-Пользователь описывает сцену. Твоя задача сгенерировать 6-8 КОРОТКИХ фраз (1-3 слова), которые актеры РЕАЛЬНО произносят в такой ситуации.
-Правила:
-1. Используй короткие бытовые фразы ("что за", "вот блин", "ха ха", "поехали").
-2. Используй теги субтитров в скобках, если это действие ("[смеется]", "[чихает]", "[плачет]").
-3. Никаких длинных описаний!
-ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (Массив строк):
-["фраза 1", "фраза 2", "фраза 3"]"""
+    
+    # 1. Берем пользовательскую стратегию
+    base_strategy = get_active_prompt()
+    # 2. Жестко приклеиваем форматирование (скрыто от юзера)
+    system_p = base_strategy + JSON_INSTRUCTION_SUFFIX
     
     response = call_openrouter(system_p, f"Опиши сцену: {query_text}", log_widget)
     if response:
@@ -191,23 +183,15 @@ def rank_database_results(user_query, fts_results, log_widget=None):
         except: pass
     return [item['id'] for item in fts_results[:5]]
 
-# =====================================================================
-# ТЕСТОВЫЙ БЛОК ДЛЯ ЗАПУСКА В ТЕРМИНАЛЕ
-# =====================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("query", type=str, help="Текст для поиска (например: 'кто-то чихает')")
     args = parser.parse_args()
     
     print(f"\n🎬 ТЕСТ ИИ-АГЕНТА: '{args.query}'")
-    print("="*50)
-    
     queries = generate_search_queries(args.query)
-    
     print("\n✅ ИТОГОВЫЙ РЕЗУЛЬТАТ (Сгенерированные фразы):")
     if queries:
-        for q in queries:
-            print(f"  - {q}")
+        for q in queries: print(f"  - {q}")
     else:
         print("❌ Не удалось сгенерировать запросы.")
-    print("="*50)

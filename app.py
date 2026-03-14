@@ -1,3 +1,22 @@
+"""
+AI Video Editor with Simple Authentication
+"""
+
+# Must be first Streamlit command
+import streamlit as st
+st.set_page_config(
+    page_title="AI Video Editor",
+    page_icon="🎬",
+    layout="wide"
+)
+
+# Simple authentication
+from auth import check_password
+
+# Check password - if False, stops here and shows login
+if not check_password():
+    st.stop()
+
 from dotenv import load_dotenv
 load_dotenv()
 import os
@@ -62,7 +81,10 @@ st.markdown("""
 SearchRow = namedtuple('SearchRow', ['title_ru', 'year', 'genres', 'rating', 'type', 'season', 'episode', 'start_time', 'end_time', 'text', 'imdb_id', 'countries', 'title_original', 'sub_id'])
 
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn: conn.execute("CREATE TABLE IF NOT EXISTS favorites (imdb_id TEXT, sub_id INTEGER, added_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(imdb_id, sub_id))")
+    with sqlite3.connect(DB_NAME) as conn: 
+        conn.execute("CREATE TABLE IF NOT EXISTS favorites (imdb_id TEXT, sub_id INTEGER, added_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(imdb_id, sub_id))")
+        # Создаем таблицу для истории поиска
+        conn.execute("CREATE TABLE IF NOT EXISTS search_history (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, mode TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
 init_db()
 
 def toggle_favorite(imdb_id, sub_id):
@@ -90,6 +112,33 @@ def is_favorite(imdb_id, sub_id):
             cur = conn.cursor(); cur.execute("SELECT 1 FROM favorites WHERE imdb_id=? AND sub_id=?", (imdb_id, sub_id))
             return bool(cur.fetchone())
     except: return False
+
+def add_to_history(query, mode):
+    if not query or not query.strip(): return
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cur = conn.cursor()
+            # Проверяем последний запрос, чтобы не спамить дубликатами подряд
+            cur.execute("SELECT query, mode FROM search_history ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
+            if row and row[0] == query and row[1] == mode:
+                return
+            conn.execute("INSERT INTO search_history (query, mode) VALUES (?, ?)", (query, mode))
+    except: pass
+
+def get_search_history(limit=50):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id, query, mode, datetime(created_at, 'localtime') FROM search_history ORDER BY id DESC LIMIT ?", (limit,))
+            return cur.fetchall()
+    except: return []
+
+def clear_search_history():
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM search_history")
+    except: pass
 
 DEFAULT_SETTINGS = {
     "search_mode": "По словам (Быстро ⚡️)", "specific_movie": "Все фильмы",
@@ -196,7 +245,6 @@ def get_surrounding_context(imdb_id, target_start_sec, target_sub_id, window_sec
     return items
 
 def get_wide_context(imdb_id, target_start_sec, window_sec=900):
-    """Широкий контекст (±15 минут) для Менеджера загрузок"""
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cur = conn.cursor()
@@ -453,7 +501,6 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("✂️ Хронометраж")
-    # УБРАН ЛИМИТ max_value
     pad_start = st.number_input("Секунд ДО фразы:", min_value=0.0, step=5.0, value=float(st.session_state.get("pad_start", 30.0)), key="pad_start", on_change=on_download_settings_change)
     pad_end = st.number_input("Секунд ПОСЛЕ фразы:", min_value=0.0, step=5.0, value=float(st.session_state.get("pad_end", 30.0)), key="pad_end", on_change=on_download_settings_change)
     source_pref = st.radio("🌐 Источник:", ["all", "youtube", "rutube", "torrent"], format_func=lambda x: {"all": "Везде (YT -> Tor)", "youtube": "Только YT", "rutube": "Только RuTube", "torrent": "Только Torrent (TorrServer ⚡️)"}[x], key="source_pref", on_change=on_download_settings_change)
@@ -504,19 +551,16 @@ def render_download_manager():
     st.markdown("---")
 
     for idx, (task_id, task) in enumerate(list(st.session_state.active_downloads.items())):
-        # Determine status icon for the accordion label
         if task['status'] == 'running':
             proc = task.get('process')
             if proc and proc.poll() is None:
                 status_icon = "⏳"
-                # Get a short status snippet for the label
                 try:
                     with open(task['log_file'], 'r', encoding='utf-8') as f:
                         short_status = get_clean_status_from_log(f.readlines()[-15:])
                 except:
                     short_status = "В процессе..."
             else:
-                # Process finished but status not yet updated
                 if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024:
                     task['status'] = 'success'
                     status_icon = "✅"
@@ -535,11 +579,9 @@ def render_download_manager():
             status_icon = "❌"
             short_status = "Ошибка"
 
-        # Build the accordion label with icon + title + short status
         quote_preview = f" — «{sanitize_html_text(task.get('quote', '')[:30])}...»" if task.get('quote') else ""
         accordion_label = f"{status_icon} {task['title']}{quote_preview} | {short_status}"
 
-        # Accordion is expanded only for running tasks
         with st.expander(accordion_label, expanded=(task['status'] == 'running')):
             if task['status'] == 'running':
                 proc = task.get('process')
@@ -586,13 +628,12 @@ def render_download_manager():
                     st.session_state.active_downloads.pop(task_id, None)
                     st.rerun()
 
-            else:  # error
+            else:  
                 st.error("❌ Ошибка загрузки")
                 if st.button("Убрать ✖", key=f"clr_{task_id}", use_container_width=True):
                     st.session_state.active_downloads.pop(task_id, None)
                     st.rerun()
 
-            # Transcription & resync section inside each download accordion
             with st.expander("📜 Транскрипция (±15 мин) и Корректировка Рассинхрона"):
                 q_filter = st.text_input(
                     "🔍 Локальный поиск (Ctrl+F):", key=f"dl_search_{task_id}",
@@ -618,7 +659,6 @@ def render_download_manager():
                             if task['status'] == 'running' and task.get('process') and task['process'].poll() is None:
                                 task['process'].terminate()
 
-                            # 3. Рассчитываем новые тайминги (+ 10 сек запас до фразы)
                             SAFETY_BUFFER = 10.0
                             start_sec = max(0, task['orig_start_sec'] - task['pad_start'] - SAFETY_BUFFER + new_offset)
                             duration = max(1, (task['orig_end_sec'] + task['pad_end'] + new_offset) - start_sec)
@@ -651,7 +691,6 @@ def render_download_manager():
                             st.success(f"✅ Смещение обновлено ({new_offset:.1f} сек). Запущен рестарт!")
                             time.sleep(1)
                             st.rerun()
-
 
 render_download_manager()
 
@@ -691,7 +730,6 @@ def render_result_card(row, uid, list_type="search"):
         c_body, c_tools = st.columns([3, 2])
         saved_source, saved_offset = get_saved_source_info(imdb_id)
         
-        # Инициализируем стейт для оффсета, если его еще нет
         state_key_offset = f"offset_{list_type}_{uid}"
         if state_key_offset not in st.session_state:
             st.session_state[state_key_offset] = float(saved_offset)
@@ -727,12 +765,10 @@ def render_result_card(row, uid, list_type="search"):
                         for sub_id_db, sub_time, sub_text in subs_chunk:
                             prefix = "🎯 " if sub_id_db == s_id else "⏱ "
                             if st.button(f"{prefix}[{str(sub_time)[:8]}] {sub_text}", key=f"sync_btn_{list_type}_{uid}_{sub_id_db}", use_container_width=True, type="tertiary"):
-                                # Автоматическое сохранение сдвига по клику
                                 st.session_state[state_key_offset] = target_sec - srt_to_seconds(sub_time)
                                 update_db_offset()
                                 st.rerun()
                 
-                # Поле тоже автоматически сохраняет значение в БД через on_change
                 st.number_input("Текущий сдвиг (+/- сек):", min_value=-3600.0, max_value=3600.0, step=0.5, key=state_key_offset, on_change=update_db_offset)
 
             with st.expander("🔎 Качается мусор? (Сменить раздачу)"):
@@ -745,7 +781,6 @@ def render_result_card(row, uid, list_type="search"):
                 if saved_sources:
                     source_options = {s["label"]: s["id"] for s in saved_sources}
                     
-                    # Функция автосохранения источника при выборе
                     def on_source_select():
                         sel = st.session_state[f"sel_src_{list_type}_{uid}"]
                         save_source_info(imdb_id, source_options[sel], st.session_state[state_key_offset])
@@ -778,7 +813,6 @@ def render_result_card(row, uid, list_type="search"):
                         "log_file": log_file_path, 
                         "_log_handle": log_file_handle, 
                         "status": "running",
-                        # Метаданные для перекачивания из менеджера
                         "imdb_id": imdb_id,
                         "orig_start_sec": srt_to_seconds(start_srt),
                         "orig_end_sec": srt_to_seconds(end_srt),
@@ -795,11 +829,14 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
-tab_search, tab_favs = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное"])
+tab_search, tab_favs, tab_history, tab_ai = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов"])
 
 with tab_search:
     if st.session_state.trigger_search:
         st.session_state.trigger_search = False
+        
+        # Добавляем в историю перед самим поиском
+        add_to_history(st.session_state.last_query, st.session_state.search_mode)
         
         if st.session_state.search_mode == "ИИ-Агент (RAG Пайплайн 🤖)":
             with st.status("🚀 Запуск ИИ-агента...", expanded=True) as status_box:
@@ -859,6 +896,95 @@ with tab_favs:
             render_result_card(row, f"{row.imdb_id}_{row.sub_id}", list_type="fav")
     else:
         st.info("Вы пока ничего не добавили в избранное. Нажмите 🤍 на любой карточке в поиске!")
+
+with tab_history:
+    st.markdown("### 🕰 История поиска")
+    c1, c2 = st.columns([4, 1])
+    with c2:
+        if st.button("🗑 Очистить историю", use_container_width=True):
+            clear_search_history()
+            st.rerun()
+
+    history_records = get_search_history(30)
+    if history_records:
+        for hid, q, mode, dt in history_records:
+            with st.container(border=True):
+                hc1, hc2, hc3 = st.columns([4, 2, 2])
+                with hc1:
+                    st.markdown(f"**{sanitize_html_text(q)}**")
+                with hc2:
+                    st.caption(f"{mode}")
+                    st.caption(f"🗓 {dt}")
+                with hc3:
+                    if st.button("Повторить 🔍", key=f"hist_{hid}", use_container_width=True):
+                        st.session_state.search_query_input = q
+                        st.session_state.last_query = q
+                        st.session_state.search_mode = mode
+                        st.session_state.trigger_search = True
+                        st.toast("🚀 Поиск запущен! Перейдите во вкладку 'Результаты поиска'.")
+                        st.rerun()
+    else:
+        st.info("История поиска пока пуста.")
+
+
+with tab_ai:
+    st.markdown("### 🧠 Настройка стратегии поиска (Промпты)")
+    st.info("Экспериментируйте с тем, как ИИ 'переводит' ваши смыслы в поисковые теги. Инструкции по генерации JSON подставляются скриптом **автоматически** (не пишите их здесь).")
+    
+    import ai_agent
+    
+    prompt_data = ai_agent.load_prompts()
+    hist_dict = prompt_data.get("history", {})
+    curr_name = prompt_data.get("current", "Базовый (По умолчанию)")
+    
+    c_sel, c_del = st.columns([4, 1])
+    with c_sel:
+        # Если вдруг ключ удалился из истории
+        if curr_name not in hist_dict:
+            curr_name = list(hist_dict.keys())[0] if hist_dict else "Базовый (По умолчанию)"
+            
+        selected_prompt_name = st.selectbox(
+            "📂 Загрузить из истории:", 
+            list(hist_dict.keys()), 
+            index=list(hist_dict.keys()).index(curr_name) if curr_name in hist_dict else 0
+        )
+        
+    with c_del:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("🗑 Удалить", use_container_width=True):
+            if selected_prompt_name != "Базовый (По умолчанию)":
+                del hist_dict[selected_prompt_name]
+                prompt_data["current"] = "Базовый (По умолчанию)"
+                ai_agent.save_prompts(prompt_data)
+                st.rerun()
+            else:
+                st.error("Базовый промпт удалить нельзя!")
+                
+    # Текстовое поле с редактируемым промптом
+    edit_text = st.text_area(
+        "📝 Логика генерации (ваша стратегия):", 
+        value=hist_dict.get(selected_prompt_name, ""), 
+        height=300
+    )
+    
+    st.caption("✨ *Скрытая часть (добавится автоматически): 'ОТВЕТЬ СТРОГО В ФОРМАТЕ JSON (Массив строк)...'*")
+    
+    c_save1, c_save2 = st.columns([3, 1])
+    with c_save1:
+        new_prompt_name = st.text_input("Название (сохранить как):", value=selected_prompt_name)
+    with c_save2:
+        st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("💾 Сохранить и Применить", type="primary", use_container_width=True):
+            if not new_prompt_name.strip():
+                st.error("Укажите название!")
+            else:
+                hist_dict[new_prompt_name] = edit_text
+                prompt_data["current"] = new_prompt_name
+                prompt_data["history"] = hist_dict
+                ai_agent.save_prompts(prompt_data)
+                st.toast(f"✅ Промпт '{new_prompt_name}' сохранен и активирован!")
+                st.rerun()
+
 
 if count_running_downloads() > 0:
     time.sleep(1.5)
