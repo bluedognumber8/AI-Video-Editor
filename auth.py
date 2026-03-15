@@ -1,18 +1,30 @@
-#auth.py
 """
 Authentication module with Enter key support
 """
 
 import streamlit as st
 import time
+import os
+from dotenv import load_dotenv
 
-# Password
-PASSWORD = "nazarov"
+load_dotenv()
 
-# Session duration in seconds (24 hours)
-SESSION_DURATION = 24 * 60 * 60
+# Read Password and Timeout from .env
+PASSWORD = os.environ.get("APP_PASSWORD", "nazarov")
+
+try:
+    SESSION_DAYS = int(os.environ.get("SESSION_TIMEOUT", "30"))
+except ValueError:
+    SESSION_DAYS = 30
+    
+SESSION_DURATION = SESSION_DAYS * 24 * 60 * 60
 
 def check_password():
+    """
+    Password check with Enter key support.
+    Returns True if authenticated.
+    """
+# ... (KEEP THE REST OF YOUR auth.py CODE EXACTLY THE SAME) ...
     """
     Password check with Enter key support.
     Returns True if authenticated.

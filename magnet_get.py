@@ -392,7 +392,8 @@ class TorrServerEngine:
             return True # Системный сервер уже запущен
 
         logger.info(f"Запуск TorrServer на порту {self.port}...")
-        log_file = f"torrserver_debug_{self.port}.log"
+        ensure_dir("logs") # <--- ADD THIS
+        log_file = f"logs/torrserver_debug_{self.port}.log" # <--- NEW
         self.log_file_handle = open(log_file, "w", encoding="utf-8")
         
         cmd = [self.binary_path, "-p", str(self.port), "-d", self.db_dir]
@@ -572,7 +573,8 @@ def do_torrent_download(
     topic_id, torrent_title, start_time, duration_secs,
     output_path, target_season, target_episode, session, active_domain
 ):
-    torrent_path = f"temp_{topic_id}_{os.getpid()}.torrent"
+    ensure_dir("temp") # <--- ADD THIS
+    torrent_path = f"temp/temp_{topic_id}_{os.getpid()}.torrent" # <--- NEW
     engine = None
     t_hash = None
 

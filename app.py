@@ -61,6 +61,9 @@ except: morph = None
 
 DB_NAME = 'movies_master.sqlite'
 CLIPS_DIR = 'clips'
+LOGS_DIR = 'logs'         # <--- ADD THIS
+os.makedirs(CLIPS_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)  # <--- ADD THIS
 SETTINGS_FILE = "user_settings.json"
 RESULTS_PER_PAGE = 10
 MAX_ACTIVE_DOWNLOADS = 5
@@ -813,7 +816,7 @@ def render_result_card(row, uid, list_type="search"):
                     cmd = [sys.executable, "-u", "magnet_get.py", "--title", str(title), "--orig_title", str(orig_title or ""), "--year", str(safe_int(year)), "--type", str(m_type), "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), "--source", source_pref, "--output", expected_file]
                     if saved_source: cmd.extend(["--force_source", saved_source])
 
-                    log_file_path = os.path.join(CLIPS_DIR, f"{task_id}_log.txt")
+                    log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt") # <--- NEW
                     log_file_handle = open(log_file_path, "w", encoding="utf-8")
                     process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT, text=True, env=os.environ.copy())
 
