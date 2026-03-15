@@ -85,6 +85,23 @@ def init_db():
     with sqlite3.connect(DB_NAME) as conn: 
         conn.execute("CREATE TABLE IF NOT EXISTS favorites (imdb_id TEXT, sub_id INTEGER, added_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(imdb_id, sub_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS search_history (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, mode TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
+        
+        # --- NEW DB SCHEMA FOR SOURCES & OFFSETS ---
+        conn.execute("CREATE TABLE IF NOT EXISTS movie_bindings (imdb_id TEXT PRIMARY KEY, source_id TEXT)")
+        conn.execute("CREATE TABLE IF NOT EXISTS source_offsets (source_id TEXT PRIMARY KEY, offset_sec REAL)")
+        
+        # Auto-migrate old data if exists
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='movie_sources'")
+        if cur.fetchone():
+            try:
+                cur.execute("SELECT imdb_id, source_id, offset_sec FROM movie_sources")
+                for r_imdb, r_src, r_off in cur.fetchall():
+                    eff_src = r_src if r_src else f"auto_{r_imdb}"
+                    conn.execute("INSERT OR IGNORE INTO movie_bindings VALUES (?, ?)", (r_imdb, r_src))
+                    conn.execute("INSERT OR IGNORE INTO source_offsets VALUES (?, ?)", (eff_src, r_off))
+                conn.execute("DROP TABLE movie_sources")
+            except: pass
 init_db()
 
 def toggle_favorite(imdb_id, sub_id):
@@ -248,28 +265,40 @@ def get_wide_context(imdb_id, target_start_sec, target_sub_id=None, window_sec=9
             items.append({"id": s_id, "sec": r_sec, "time_str": str(r_st)[:8], "text": r_tx})
     return items
 
+# --- SOURCE & OFFSET LOGIC REWRITE ---
 def get_saved_source_info(imdb_id):
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='movie_sources'")
-            if not cur.fetchone(): return None, 0.0
-            cur.execute("SELECT source_id, offset_sec FROM movie_sources WHERE imdb_id = ?", (imdb_id,))
+            cur.execute("SELECT source_id FROM movie_bindings WHERE imdb_id = ?", (imdb_id,))
             row = cur.fetchone()
-            return (row[0], row[1]) if row else (None, 0.0)
+            source_id = row[0] if row else None
+            
+            # If no manual source is bound, use an 'auto' profile for this movie's offset
+            eff_src = source_id if source_id else f"auto_{imdb_id}"
+            cur.execute("SELECT offset_sec FROM source_offsets WHERE source_id = ?", (eff_src,))
+            row_off = cur.fetchone()
+            offset_sec = row_off[0] if row_off else 0.0
+            
+            return source_id, offset_sec
     except: return None, 0.0
 
-def save_source_info(imdb_id, source_id, offset_sec):
+def set_movie_source(imdb_id, source_id):
     try:
         with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS movie_sources (imdb_id TEXT PRIMARY KEY, source_id TEXT, offset_sec REAL)")
-            conn.execute("INSERT OR REPLACE INTO movie_sources VALUES (?, ?, ?)", (imdb_id, source_id, offset_sec))
+            if source_id:
+                conn.execute("INSERT OR REPLACE INTO movie_bindings VALUES (?, ?)", (imdb_id, source_id))
+            else:
+                conn.execute("DELETE FROM movie_bindings WHERE imdb_id = ?", (imdb_id,))
     except: pass
 
-def delete_source_info(imdb_id):
+def set_source_offset(imdb_id, source_id, offset_sec):
     try:
-        with sqlite3.connect(DB_NAME) as conn: conn.execute("DELETE FROM movie_sources WHERE imdb_id = ?", (imdb_id,))
+        with sqlite3.connect(DB_NAME) as conn:
+            eff_src = source_id if source_id else f"auto_{imdb_id}"
+            conn.execute("INSERT OR REPLACE INTO source_offsets VALUES (?, ?)", (eff_src, offset_sec))
     except: pass
+# ------------------------------------
 
 def manual_video_search(query, min_duration):
     res = []
@@ -484,7 +513,6 @@ def get_clean_status_from_log(log_lines):
         elif "Выбран файл" in line: return "📁 Анализ торрента..."
     return "⏳ В процессе..."
 
-# --- NEW: EXTRACT METADATA FROM LOGS FOR DEBUG UI ---
 def extract_download_metadata(log_lines):
     info = {"source_title": None, "exact_file": None}
     for line in log_lines:
@@ -619,7 +647,6 @@ def render_download_manager():
 
         with st.expander(accordion_label, expanded=(task['status'] == 'running')):
             
-            # --- NEW: SOURCE & METADATA DISPLAY ---
             if os.path.exists(task['log_file']):
                 try:
                     with open(task['log_file'], 'r', encoding='utf-8') as f:
@@ -707,7 +734,13 @@ def render_download_manager():
                             type="primary" if is_target else "tertiary" 
                         ):
                             new_offset = task['orig_start_sec'] - s['sec']
-                            save_source_info(task['imdb_id'], task.get('saved_source') or "", new_offset)
+                            # FIXED: Apply offset strictly to the source used by this task!
+                            set_source_offset(task['imdb_id'], task.get('saved_source'), new_offset)
+                            
+                            # Force the card UI slider to update visually
+                            for k in list(st.session_state.keys()):
+                                if k.startswith(f"offset_search_{task['imdb_id']}_{task['sub_id']}") or k.startswith(f"offset_fav_{task['imdb_id']}_{task['sub_id']}"):
+                                    st.session_state[k] = float(new_offset)
 
                             if task['status'] == 'running' and task.get('process') and task['process'].poll() is None:
                                 task['process'].terminate()
@@ -786,6 +819,8 @@ def render_result_card(row, uid, list_type="search"):
                 st.rerun()
 
         c_body, c_tools = st.columns([3, 2])
+        
+        # Load the source and the offset strictly for that source!
         saved_source, saved_offset = get_saved_source_info(imdb_id)
         
         state_key_offset = f"offset_{list_type}_{uid}"
@@ -793,7 +828,7 @@ def render_result_card(row, uid, list_type="search"):
             st.session_state[state_key_offset] = float(saved_offset)
 
         def update_db_offset():
-            save_source_info(imdb_id, saved_source or "", st.session_state[state_key_offset])
+            set_source_offset(imdb_id, saved_source, st.session_state[state_key_offset])
 
         with c_body:
             st.markdown(f"<div style='font-size: 18px; border-left: 4px solid #ff4b4b; padding-left: 15px; margin: 10px 0;'><i>«{text_html}»</i></div>", unsafe_allow_html=True)
@@ -808,7 +843,11 @@ def render_result_card(row, uid, list_type="search"):
 
             if saved_source:
                 st.info(f"📌 Привязан источник: {sanitize_html_text(str(saved_source)[:20])}...")
-                if st.button("🗑 Отвязать", key=f"reset_{list_type}_{uid}"): delete_source_info(imdb_id); st.rerun()
+                if st.button("🗑 Отвязать", key=f"reset_{list_type}_{uid}"): 
+                    set_movie_source(imdb_id, None)
+                    _, new_off = get_saved_source_info(imdb_id)
+                    st.session_state[state_key_offset] = float(new_off)
+                    st.rerun()
 
         with c_tools:
             with st.expander("🛠 Рассинхрон? (Умная подгонка)"):
@@ -841,7 +880,12 @@ def render_result_card(row, uid, list_type="search"):
                     
                     def on_source_select():
                         sel = st.session_state[f"sel_src_{list_type}_{uid}"]
-                        save_source_info(imdb_id, source_options[sel], st.session_state[state_key_offset])
+                        new_src = source_options[sel]
+                        # Change source
+                        set_movie_source(imdb_id, new_src)
+                        # Immediately load the offset for this new source to the UI!
+                        _, new_off = get_saved_source_info(imdb_id)
+                        st.session_state[state_key_offset] = float(new_off)
                         st.toast("✅ Источник закреплен!")
                         
                     st.selectbox("Выберите видео:", list(source_options.keys()), key=f"sel_src_{list_type}_{uid}", on_change=on_source_select)
