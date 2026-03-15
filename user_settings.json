@@ -4,7 +4,7 @@
   "t_type": "Фильмы",
   "c_filter": "Наше (RU/SU)",
   "genre_filter": "Comedy",
-  "min_rating": 8.0,
+  "min_rating": 7.0,
   "pad_start": 30.0,
   "pad_end": 30.0,
   "source_pref": "torrent"

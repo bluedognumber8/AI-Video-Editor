@@ -33,7 +33,6 @@ import subprocess
 import sys
 import time
 import json
-import urllib.parse
 import logging
 import html as html_module
 from collections import namedtuple
@@ -61,7 +60,6 @@ except: morph = None
 DB_NAME = 'movies_master.sqlite'
 CLIPS_DIR = 'clips'
 LOGS_DIR = 'logs'
-SETTINGS_FILE = "user_settings.json"
 RESULTS_PER_PAGE = 10
 MAX_ACTIVE_DOWNLOADS = 5
 
@@ -76,6 +74,8 @@ st.markdown("""
             border-bottom: 1px solid rgba(128,128,128, 0.2); margin-bottom: 15px;
         }
         .stButton button { margin-top: 0px; }
+        .clear-btn-col { padding-top: 28px; }
+        .source-meta-box { background: rgba(128,128,128,0.1); padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -139,27 +139,18 @@ def clear_search_history():
             conn.execute("DELETE FROM search_history")
     except: pass
 
+# --- SESSION BASED SETTINGS (No global JSON saving) ---
 DEFAULT_SETTINGS = {
     "search_mode": "По словам (Быстро ⚡️)", "specific_movie": "Все фильмы",
     "t_type": "Все", "c_filter": "Все", "genre_filter": "Любой",
     "min_rating": 0.0, "pad_start": 30.0, "pad_end": 30.0, "source_pref": "all"
 }
 
-def load_settings():
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f: return {**DEFAULT_SETTINGS, **json.load(f)}
-        except: pass
-    return dict(DEFAULT_SETTINGS)
-
-def save_settings(settings_dict):
-    try:
-        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f: json.dump(settings_dict, f, ensure_ascii=False, indent=2)
-    except: pass
-
-if "settings_loaded" not in st.session_state:
-    st.session_state.settings_loaded = True
-    for key, val in load_settings().items(): st.session_state[key] = val
+if "settings_initialized" not in st.session_state:
+    st.session_state.settings_initialized = True
+    for key, val in DEFAULT_SETTINGS.items(): 
+        if key not in st.session_state:
+            st.session_state[key] = val
 
 if "search_results" not in st.session_state: st.session_state.search_results = []
 if "search_offset" not in st.session_state: st.session_state.search_offset = 0
@@ -176,13 +167,12 @@ def trigger_new_search():
         st.session_state.trigger_search = True
 
 def on_settings_change():
-    save_settings({k: st.session_state[k] for k in DEFAULT_SETTINGS if k in st.session_state})
     st.session_state.search_offset = 0
     if st.session_state.get("search_query_input", "").strip(): trigger_new_search()
     else: st.session_state.search_results = []
 
 def on_download_settings_change():
-    save_settings({k: st.session_state[k] for k in DEFAULT_SETTINGS if k in st.session_state})
+    pass
 
 def sanitize_filename(name: str, max_length: int = 50) -> str:
     safe = re.sub(r'[^\w\s\-]', '', name, flags=re.UNICODE).strip().replace(" ", "_")
@@ -296,7 +286,6 @@ def manual_video_search(query, min_duration):
 
 def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params):
     sql = ""
-    # FIX 1: If a specific movie is chosen, IGNORE all other global filters
     if specific_movie != "Все фильмы":
         sql += " AND m.title_ru = ?"
         params.append(specific_movie)
@@ -312,7 +301,6 @@ def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific
         sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
     if genre_filter != "Любой":
         sql += " AND m.genres LIKE ?"; params.append(f"%{genre_filter}%")
-    
     return sql
 
 def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match):
@@ -325,13 +313,18 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
         query_text = query_text.strip('"')
 
     if exact_match:
-        clean_q = re.sub(r'[^\w\s]', '', query_text).strip()
-        if not clean_q: return []
-        search_query = f'"{clean_q}"'
+        words = re.findall(r'\w+', query_text)
+        if not words: return []
+        search_query = " AND ".join([f'"{w}"' for w in words]) 
     else:
         search_terms = []
         for word in re.findall(r'\w+', query_text):
             word = word.lower()
+            
+            if len(word) <= 3:
+                search_terms.append(f"{word}")
+                continue
+                
             if re.search(r'[а-яё]', word):
                 variants = {word}
                 if morph:
@@ -357,15 +350,17 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
     params = [search_query]
     sql_filters = build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params)
 
-    # FIX 2: Removed the hard LIMIT 2000 from the inner MATCH block to prevent common words
-    # (like "женщина") from getting truncated before the filters are applied.
     sql = f"""
         WITH ranked AS (
             SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
                    s.start_time, s.end_time, s.text, m.imdb_id, m.countries, 
-                   m.title_original, s.id,
-                   tm.rank AS fts_rank,
-                   ROW_NUMBER() OVER (PARTITION BY m.imdb_id, SUBSTR(LTRIM(LOWER(s.text), ' .-,:;!?…"'''), 1, 20) ORDER BY s.start_time ASC) AS rn
+                   m.title_original, s.id, tm.rank AS fts_rank,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY m.imdb_id, 
+                       SUBSTR(s.start_time, 1, 4), 
+                       SUBSTR(LTRIM(LOWER(s.text), ' .-,:;!?…"'''), 1, 20) 
+                       ORDER BY s.start_time ASC
+                   ) AS rn
             FROM subtitles_fts tm 
             JOIN subtitles s ON s.id = tm.rowid 
             JOIN movies m ON s.imdb_id = m.imdb_id 
@@ -376,8 +371,6 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
         FROM ranked WHERE rn = 1 
     """
     
-    # UX Improvement: If looking inside one movie, sort results chronologically by time.
-    # Otherwise, sort by the best rating & FTS relevance.
     if specific_movie != "Все фильмы":
         sql += " ORDER BY fts_rank ASC, start_time ASC LIMIT ? OFFSET ?"
     else:
@@ -390,10 +383,9 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
         rows = cursor.fetchall()
         return [(SearchRow(*row[:14]), 100.0) for row in rows]
     except Exception as e:
-        logger.error(f"FTS Search Error: {e}")
+        logger.error(f"Search error: {e}")
         return []
-    finally: 
-        conn.close()
+    finally: conn.close()
 
 class StreamlitAIWidget:
     def __init__(self, status_container):
@@ -428,7 +420,7 @@ def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_f
     raw_results = []
     seen_ids = set()
     for q in queries:
-        res = _search_fts(q, limit=10, offset=0, min_rating=min_rating, t_type=t_type, country_filter=country_filter, genre_filter=genre_filter, specific_movie=specific_movie, exact_match=True)
+        res = _search_fts(q, limit=15, offset=0, min_rating=min_rating, t_type=t_type, country_filter=country_filter, genre_filter=genre_filter, specific_movie=specific_movie, exact_match=True)
         for r in res:
             uid = f"{r[0].imdb_id}_{r[0].sub_id}"
             if uid not in seen_ids:
@@ -442,10 +434,11 @@ def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_f
 
     ai_logger.success(f"Найдено {len(raw_results)} потенциальных совпадений (кандидатов).")
 
-    st_status_box.update(label=f"⚖️ ИИ отсматривает {len(raw_results[:30])} сцен...", state="running")
+    pool_size = 60
+    st_status_box.update(label=f"⚖️ ИИ отсматривает {len(raw_results[:pool_size])} сцен...", state="running")
     ai_logger.info("Шаг 3: Отправляем кандидатов обратно в ИИ для оценки контекста...")
     
-    candidates_for_ai = [{"id": idx, "genre": r[0].genres, "text": r[0].text} for idx, r in enumerate(raw_results[:30])]
+    candidates_for_ai = [{"id": idx, "genre": r[0].genres, "text": r[0].text} for idx, r in enumerate(raw_results[:pool_size])]
     best_indices = rank_database_results(query_text, candidates_for_ai, ai_logger)
     
     final_results = []
@@ -491,6 +484,22 @@ def get_clean_status_from_log(log_lines):
         elif "Выбран файл" in line: return "📁 Анализ торрента..."
     return "⏳ В процессе..."
 
+# --- NEW: EXTRACT METADATA FROM LOGS FOR DEBUG UI ---
+def extract_download_metadata(log_lines):
+    info = {"source_title": None, "exact_file": None}
+    for line in log_lines:
+        if "СКАЧИВАНИЕ РАЗДАЧИ:" in line:
+            info["source_title"] = "🔵 [Торрент] " + line.split("СКАЧИВАНИЕ РАЗДАЧИ:")[1].strip()
+        elif "ВЫБРАНО ВИДЕО:" in line:
+            info["source_title"] = "🔴 [Stream] " + line.split("ВЫБРАНО ВИДЕО:")[1].strip()
+        elif "Выбран файл:" in line:
+            info["exact_file"] = line.split("Выбран файл:")[1].split("(ID")[0].strip()
+        elif "Взят файл" in line:
+            try:
+                info["exact_file"] = line.split("Взят файл")[1].split(":")[1].split("(ID")[0].strip()
+            except: pass
+    return info
+
 if hasattr(st, "fragment"):
     auto_updating_fragment = st.fragment(run_every=2)
 else:
@@ -502,14 +511,22 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("🎛 Фильтры")
+    
     all_movies = ["Все фильмы"] + get_movie_titles()
-    current_movie_idx = all_movies.index(st.session_state["specific_movie"]) if st.session_state.get("specific_movie") in all_movies else 0
+    current_movie_idx = all_movies.index(st.session_state.get("specific_movie", "Все фильмы")) if st.session_state.get("specific_movie") in all_movies else 0
 
-    st.selectbox("📌 В кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
-    
-    # UX Update: If a specific movie is selected, dim the global filters to show they are inactive
+    c_mov1, c_mov2 = st.columns([5, 1])
+    with c_mov1:
+        st.selectbox("📌 В кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
+    with c_mov2:
+        st.markdown("<div class='clear-btn-col'></div>", unsafe_allow_html=True)
+        if st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы":
+            if st.button("❌", key="clear_movie", help="Сбросить выбранный фильм"):
+                st.session_state.specific_movie = "Все фильмы"
+                on_settings_change()
+                st.rerun()
+
     filters_disabled = st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы"
-    
     if filters_disabled:
         st.caption("*(Глобальные фильтры отключены, так как выбран конкретный фильм)*")
 
@@ -533,7 +550,6 @@ with search_container:
         st.checkbox("🎯 Точная фраза", key="exact_match_checkbox", on_change=trigger_new_search)
     with c_btn:
         if st.button("Найти 🚀", use_container_width=True, type="primary"): trigger_new_search()
-
 
 @auto_updating_fragment
 def render_download_manager():
@@ -602,6 +618,22 @@ def render_download_manager():
         accordion_label = f"{status_icon} {task['title']}{quote_preview} | {short_status}"
 
         with st.expander(accordion_label, expanded=(task['status'] == 'running')):
+            
+            # --- NEW: SOURCE & METADATA DISPLAY ---
+            if os.path.exists(task['log_file']):
+                try:
+                    with open(task['log_file'], 'r', encoding='utf-8') as f:
+                        all_lines = f.readlines()
+                        meta = extract_download_metadata(all_lines)
+                        if meta["source_title"] or meta["exact_file"]:
+                            st.markdown("<div class='source-meta-box'>", unsafe_allow_html=True)
+                            if meta["source_title"]:
+                                st.markdown(f"**Источник:** `{meta['source_title']}`")
+                            if meta["exact_file"]:
+                                st.markdown(f"**Файл внутри:** `{meta['exact_file']}`")
+                            st.markdown("</div>", unsafe_allow_html=True)
+                except: pass
+
             if task['status'] == 'running':
                 proc = task.get('process')
                 if proc and proc.poll() is None:
@@ -729,12 +761,17 @@ def render_result_card(row, uid, list_type="search"):
         is_exact = st.session_state.get("exact_match_checkbox", False) or (q.startswith('"') and q.endswith('"'))
         if is_exact:
             clean_q = re.escape(re.sub(r'[^\w\s]', '', q).strip())
-            try: text_html = re.sub(f"(?i)({clean_q})", r'<mark style="background-color: #ffd700; color: #000; padding: 0 4px; border-radius: 4px;"><b>\g<0></b></mark>', text_html)
-            except: pass
+            for w in clean_q.split():
+                try: text_html = re.sub(f"(?i)({re.escape(w)})", r'<mark style="background-color: #ffd700; color: #000; padding: 0 4px; border-radius: 4px;"><b>\g<0></b></mark>', text_html)
+                except: pass
         else:
             for w in re.findall(r'\w+', q):
-                try: text_html = re.sub(f"(?i)({re.escape(w)})[а-яА-Яa-zA-Z]*", r'<mark style="background-color: #ffd700; color: #000; padding: 0 2px; border-radius: 3px;"><b>\g<0></b></mark>', text_html)
-                except: pass
+                if len(w) > 3:
+                    try: text_html = re.sub(f"(?i)({re.escape(w)})[а-яА-Яa-zA-Z]*", r'<mark style="background-color: #ffd700; color: #000; padding: 0 2px; border-radius: 3px;"><b>\g<0></b></mark>', text_html)
+                    except: pass
+                else:
+                    try: text_html = re.sub(f"(?i)\\b({re.escape(w)})\\b", r'<mark style="background-color: #ffd700; color: #000; padding: 0 2px; border-radius: 3px;"><b>\g<0></b></mark>', text_html)
+                    except: pass
 
     with st.container(border=True):
         c_head1, c_head2 = st.columns([5, 1])
@@ -818,8 +855,6 @@ def render_result_card(row, uid, list_type="search"):
                 else:
                     task_id = f"task_{imdb_id}_{int(time.time())}"
                     expected_file = os.path.join(CLIPS_DIR, f"{sanitize_filename(f'{title}_{year}')}__{sanitize_filename(text_escaped, 25)}_{task_id[-6:]}.mp4")
-                    
-                    # LOGS DIRECTORY FIX
                     log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
 
                     cmd = [sys.executable, "-u", "magnet_get.py", "--title", str(title), "--orig_title", str(orig_title or ""), "--year", str(safe_int(year)), "--type", str(m_type), "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), "--source", source_pref, "--output", expected_file]
