@@ -1,3 +1,4 @@
+# app.py
 """
 AI Video Editor with Simple Authentication
 """
@@ -244,17 +245,25 @@ def get_surrounding_context(imdb_id, target_start_sec, target_sub_id, window_sec
             items.append({"sec": r_sec, "label": f"[{str(r_st)[:8]}] {str(r_tx)[:70]}", "text": r_tx, "time_str": str(r_st)[:8], "is_target": abs(r_sec - target_start_sec) < 5})
     return items
 
-def get_wide_context(imdb_id, target_start_sec, window_sec=900):
+def get_wide_context(imdb_id, target_start_sec, target_sub_id=None, window_sec=900):
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cur = conn.cursor()
-            cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? ORDER BY start_time ASC", (imdb_id,))
+            if target_sub_id is not None:
+                # Ограничиваем окно по ID субтитра (± 800 фраз), чтобы не захватывать другие версии субтитров этого же фильма
+                cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? AND id BETWEEN ? AND ? ORDER BY start_time ASC", (imdb_id, target_sub_id - 800, target_sub_id + 800))
+            else:
+                cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? ORDER BY start_time ASC", (imdb_id,))
             rows = cur.fetchall()
     except: return []
+    
     items = []
     for s_id, r_st, r_tx in rows:
         r_sec = srt_to_seconds(r_st)
         if abs(r_sec - target_start_sec) <= window_sec:
+            # Умная локальная дедупликация: не добавлять фразу, если точно такая же прозвучала меньше 5 секунд назад
+            if items and any(x['text'] == r_tx and abs(x['sec'] - r_sec) < 5.0 for x in items[-5:]):
+                continue
             items.append({"id": s_id, "sec": r_sec, "time_str": str(r_st)[:8], "text": r_tx})
     return items
 
@@ -639,19 +648,22 @@ def render_download_manager():
                     "🔍 Локальный поиск (Ctrl+F):", key=f"dl_search_{task_id}",
                     placeholder="Начните вводить текст, чтобы отфильтровать список..."
                 )
-                subs = get_wide_context(task['imdb_id'], task['orig_start_sec'], window_sec=900)
+                subs = get_wide_context(task['imdb_id'], task['orig_start_sec'], task.get('sub_id'), window_sec=900)
 
                 if q_filter:
                     subs = [s for s in subs if q_filter.lower() in s['text'].lower()]
 
                 with st.container(height=250):
                     for s in subs:
-                        prefix = "🎯 " if abs(s['sec'] - task['orig_start_sec']) < 2 else "⏱ "
+                        # Если известен точный sub_id - используем его для идеального совпадения, иначе примерное по секундам
+                        is_target = (s['id'] == task.get('sub_id')) if task.get('sub_id') else (abs(s['sec'] - task['orig_start_sec']) < 2)
+                        prefix = "🎯 " if is_target else "⏱ "
+                        
                         if st.button(
                             f"{prefix}[{s['time_str']}] {s['text']}",
                             key=f"fix_dl_{task_id}_{s['id']}",
                             use_container_width=True,
-                            type="secondary" if "🎯" in prefix else "tertiary"
+                            type="primary" if is_target else "tertiary" # Красный / акцентный фон для нашей искомой фразы
                         ):
                             new_offset = task['orig_start_sec'] - s['sec']
                             save_source_info(task['imdb_id'], task.get('saved_source') or "", new_offset)
@@ -814,6 +826,7 @@ def render_result_card(row, uid, list_type="search"):
                         "_log_handle": log_file_handle, 
                         "status": "running",
                         "imdb_id": imdb_id,
+                        "sub_id": s_id,  # Убедились что передаем точный ID субтитра в менеджер загрузок
                         "orig_start_sec": srt_to_seconds(start_srt),
                         "orig_end_sec": srt_to_seconds(end_srt),
                         "pad_start": pad_start,

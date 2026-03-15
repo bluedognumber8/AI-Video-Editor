@@ -1,8 +1,8 @@
 {
   "search_mode": "По словам (Быстро ⚡️)",
-  "specific_movie": "Побег из Шоушенка",
+  "specific_movie": "Все фильмы",
   "t_type": "Фильмы",
-  "c_filter": "Все",
+  "c_filter": "Наше (RU/SU)",
   "genre_filter": "Любой",
   "min_rating": 7.0,
   "pad_start": 30.0,

@@ -1,0 +1,9 @@
+streamlit>=1.30.0
+python-dotenv
+pandas
+nltk
+pymorphy3
+requests
+beautifulsoup4
+bencodepy
+yt-dlp

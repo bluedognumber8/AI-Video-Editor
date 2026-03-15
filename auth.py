@@ -1,3 +1,4 @@
+#auth.py
 """
 Authentication module with Enter key support
 """
