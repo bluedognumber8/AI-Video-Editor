@@ -36,7 +36,10 @@ def create_launchers(os_name, is_arch=False):
 
     if os_name == "Windows":
         with open("start.bat", "w") as f:
-            f.write("@echo off\ncall venv\\Scripts\\activate\nstreamlit run app.py\npause\n")
+            f.write("@echo off\n")
+            f.write("call venv\\Scripts\\activate\n")
+            f.write("python -m streamlit run app.py\n")  # <-- FIXED LINE
+            f.write("pause\n")
         with open("update.bat", "w", encoding="utf-8") as f:
             f.write("@echo off\necho 🔄 Updating AI Video Editor...\n")
             f.write("git fetch\ngit reset --hard @{u}\n") 
@@ -46,8 +49,10 @@ def create_launchers(os_name, is_arch=False):
     else:
         with open("start.sh", "w") as f:
             f.write("#!/bin/bash\n")
-            if not is_arch: f.write("source venv/bin/activate\n")
-            f.write("streamlit run app.py\n")
+            if not is_arch: 
+                f.write("source venv/bin/activate\n")
+            f.write("python3 -m streamlit run app.py\n") # <-- FIXED LINE
+            
         with open("update.sh", "w", encoding="utf-8") as f:
             f.write("#!/bin/bash\n")
             f.write('echo "🔄 Updating AI Video Editor..."\n')
