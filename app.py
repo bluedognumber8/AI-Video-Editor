@@ -543,16 +543,18 @@ with st.sidebar:
     all_movies = ["Все фильмы"] + get_movie_titles()
     current_movie_idx = all_movies.index(st.session_state.get("specific_movie", "Все фильмы")) if st.session_state.get("specific_movie") in all_movies else 0
 
+    # --- FIX: Callback for the specific movie clear button ---
+    def clear_movie_action():
+        st.session_state.specific_movie = "Все фильмы"
+        on_settings_change()
+
     c_mov1, c_mov2 = st.columns([5, 1])
     with c_mov1:
         st.selectbox("📌 В кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
     with c_mov2:
         st.markdown("<div class='clear-btn-col'></div>", unsafe_allow_html=True)
         if st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы":
-            if st.button("❌", key="clear_movie", help="Сбросить выбранный фильм"):
-                st.session_state.specific_movie = "Все фильмы"
-                on_settings_change()
-                st.rerun()
+            st.button("❌", key="clear_movie", help="Сбросить выбранный фильм", on_click=clear_movie_action)
 
     filters_disabled = st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы"
     if filters_disabled:
@@ -734,10 +736,8 @@ def render_download_manager():
                             type="primary" if is_target else "tertiary" 
                         ):
                             new_offset = task['orig_start_sec'] - s['sec']
-                            # FIXED: Apply offset strictly to the source used by this task!
                             set_source_offset(task['imdb_id'], task.get('saved_source'), new_offset)
                             
-                            # Force the card UI slider to update visually
                             for k in list(st.session_state.keys()):
                                 if k.startswith(f"offset_search_{task['imdb_id']}_{task['sub_id']}") or k.startswith(f"offset_fav_{task['imdb_id']}_{task['sub_id']}"):
                                     st.session_state[k] = float(new_offset)
@@ -820,7 +820,6 @@ def render_result_card(row, uid, list_type="search"):
 
         c_body, c_tools = st.columns([3, 2])
         
-        # Load the source and the offset strictly for that source!
         saved_source, saved_offset = get_saved_source_info(imdb_id)
         
         state_key_offset = f"offset_{list_type}_{uid}"
@@ -881,9 +880,7 @@ def render_result_card(row, uid, list_type="search"):
                     def on_source_select():
                         sel = st.session_state[f"sel_src_{list_type}_{uid}"]
                         new_src = source_options[sel]
-                        # Change source
                         set_movie_source(imdb_id, new_src)
-                        # Immediately load the offset for this new source to the UI!
                         _, new_off = get_saved_source_info(imdb_id)
                         st.session_state[state_key_offset] = float(new_off)
                         st.toast("✅ Источник закреплен!")
