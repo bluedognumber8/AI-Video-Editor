@@ -30,7 +30,7 @@ def create_directories():
         os.makedirs(d, exist_ok=True)
         print(f"✅ Created '{d}/'")
 
-def create_launchers(os_name, is_arch=False):
+def create_launchers(os_name):
     print_step("Creating Launchers and Update Scripts...")
     py_exec = sys.executable
 
@@ -38,7 +38,7 @@ def create_launchers(os_name, is_arch=False):
         with open("start.bat", "w") as f:
             f.write("@echo off\n")
             f.write("call venv\\Scripts\\activate\n")
-            f.write("python -m streamlit run app.py\n")  # <-- FIXED LINE
+            f.write("python -m streamlit run app.py\n")
             f.write("pause\n")
         with open("update.bat", "w", encoding="utf-8") as f:
             f.write("@echo off\necho 🔄 Updating AI Video Editor...\n")
@@ -49,10 +49,8 @@ def create_launchers(os_name, is_arch=False):
     else:
         with open("start.sh", "w") as f:
             f.write("#!/bin/bash\n")
-            if not is_arch: 
-                f.write("source venv/bin/activate\n")
-            f.write("python3 -m streamlit run app.py\n") # <-- FIXED LINE
-            
+            f.write("source venv/bin/activate\n")
+            f.write("python3 -m streamlit run app.py\n")
         with open("update.sh", "w", encoding="utf-8") as f:
             f.write("#!/bin/bash\n")
             f.write('echo "🔄 Updating AI Video Editor..."\n')
@@ -70,7 +68,6 @@ def setup_env_file(ts_path):
         with open(".env", "r", encoding="utf-8") as f:
             content = f.read()
         
-        # Replace the TORRSERVER_PATH line
         if "TORRSERVER_PATH=" in content:
             content = re.sub(r"TORRSERVER_PATH=.*", f"TORRSERVER_PATH={ts_path}", content)
         else:
@@ -82,35 +79,51 @@ def setup_env_file(ts_path):
     else:
         print("⚠️ .env file missing! Did you forget to pull it from Git?")
 
+def setup_python_venv():
+    print_step("Setting up Python Virtual Environment...")
+    venv_dir = "venv"
+    if not os.path.exists(venv_dir): 
+        venv.create(venv_dir, with_pip=True)
+        print("✅ Created new venv.")
+    
+    os_name = platform.system()
+    pip_cmd = os.path.join(venv_dir, "Scripts", "pip") if os_name == "Windows" else os.path.join(venv_dir, "bin", "pip")
+    py_cmd = os.path.join(venv_dir, "Scripts", "python") if os_name == "Windows" else os.path.join(venv_dir, "bin", "python")
+
+    print("Installing python packages via pip...")
+    run_cmd([pip_cmd, "install", "--upgrade", "pip"])
+    run_cmd([pip_cmd, "install", "-r", "requirements.txt"])
+    
+    print("Downloading NLTK language models into venv...")
+    run_cmd([py_cmd, "-c", "import nltk; nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True); nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)"])
+
+
 # ==========================================
 # ARCH LINUX NATIVE INSTALLATION
 # ==========================================
 def install_arch():
-    print_step("Arch Linux Detected! Installing 'The Arch Way' via yay...")
+    print_step("Arch Linux Detected!")
     if not shutil.which("yay"):
         print("❌ 'yay' is not installed. Please install it first.")
         sys.exit(1)
 
-    arch_packages = [
-        "ffmpeg", "yt-dlp", "torrserver-bin",
-        "python-streamlit", "python-dotenv", "python-pandas", 
-        "python-nltk", "python-requests", "python-beautifulsoup4", 
-        "python-pymorphy3", "python-bencode.py"
-    ]
-    
+    # ONLY install system binaries via yay now. No python packages.
+    arch_packages = ["ffmpeg", "torrserver-bin"]
+    print(f"Installing system packages: {' '.join(arch_packages)}")
     run_cmd(["yay", "-S", "--needed", "--noconfirm"] + arch_packages)
-    print("\nDownloading NLTK language models globally...")
-    run_cmd([sys.executable, "-c", "import nltk; nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True); nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)"])
+
+    # Use VENV for Python!
+    setup_python_venv()
 
     setup_env_file("torrserver")
-    create_launchers("Linux", is_arch=True)
+    create_launchers("Linux")
 
 # ==========================================
 # WINDOWS / MACOS / UBUNTU INSTALLATION
 # ==========================================
 def install_standard():
     os_name = platform.system()
-    print_step(f"{os_name} Detected! Setting up Virtual Environment...")
+    print_step(f"{os_name} Detected!")
 
     if not shutil.which("ffmpeg"):
         if os_name == "Windows": run_cmd("winget install -e --id Gyan.FFmpeg", shell=True)
@@ -137,19 +150,11 @@ def install_standard():
             if os_name != "Windows": os.chmod(out_name, 0o755)
         except Exception as e: print(f"❌ Failed to download TorrServer: {e}")
 
-    venv_dir = "venv"
-    if not os.path.exists(venv_dir): venv.create(venv_dir, with_pip=True)
-    
-    pip_cmd = os.path.join(venv_dir, "Scripts", "pip") if os_name == "Windows" else os.path.join(venv_dir, "bin", "pip")
-    py_cmd = os.path.join(venv_dir, "Scripts", "python") if os_name == "Windows" else os.path.join(venv_dir, "bin", "python")
-
-    print("Installing python packages via pip...")
-    run_cmd([pip_cmd, "install", "--upgrade", "pip"])
-    run_cmd([pip_cmd, "install", "-r", "requirements.txt"])
-    run_cmd([py_cmd, "-c", "import nltk; nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True); nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)"])
+    # Use VENV for Python!
+    setup_python_venv()
 
     setup_env_file(f"./{out_name}" if os_name != "Windows" else out_name)
-    create_launchers(os_name, is_arch=False)
+    create_launchers(os_name)
 
 def main():
     print("\n🎬 Welcome to the AI Video Editor Universal Installer 🎬\n")
