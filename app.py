@@ -25,7 +25,6 @@ import os
 if "TORRSERVER_PATH" not in os.environ:
     os.environ["TORRSERVER_PATH"] = "torrserver"
 
-import streamlit as st
 import sqlite3
 import pandas as pd
 import re
@@ -61,15 +60,13 @@ except: morph = None
 
 DB_NAME = 'movies_master.sqlite'
 CLIPS_DIR = 'clips'
-LOGS_DIR = 'logs'         # <--- ADD THIS
-os.makedirs(CLIPS_DIR, exist_ok=True)
-os.makedirs(LOGS_DIR, exist_ok=True)  # <--- ADD THIS
+LOGS_DIR = 'logs'
 SETTINGS_FILE = "user_settings.json"
 RESULTS_PER_PAGE = 10
 MAX_ACTIVE_DOWNLOADS = 5
 
 os.makedirs(CLIPS_DIR, exist_ok=True)
-st.set_page_config(page_title="AI-Режиссер Монтажа", page_icon="🎬", layout="wide")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 st.markdown("""
     <style>
@@ -87,7 +84,6 @@ SearchRow = namedtuple('SearchRow', ['title_ru', 'year', 'genres', 'rating', 'ty
 def init_db():
     with sqlite3.connect(DB_NAME) as conn: 
         conn.execute("CREATE TABLE IF NOT EXISTS favorites (imdb_id TEXT, sub_id INTEGER, added_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(imdb_id, sub_id))")
-        # Создаем таблицу для истории поиска
         conn.execute("CREATE TABLE IF NOT EXISTS search_history (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, mode TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
 init_db()
 
@@ -122,7 +118,6 @@ def add_to_history(query, mode):
     try:
         with sqlite3.connect(DB_NAME) as conn:
             cur = conn.cursor()
-            # Проверяем последний запрос, чтобы не спамить дубликатами подряд
             cur.execute("SELECT query, mode FROM search_history ORDER BY id DESC LIMIT 1")
             row = cur.fetchone()
             if row and row[0] == query and row[1] == mode:
@@ -193,11 +188,6 @@ def sanitize_filename(name: str, max_length: int = 50) -> str:
     safe = re.sub(r'[^\w\s\-]', '', name, flags=re.UNICODE).strip().replace(" ", "_")
     return safe[:max_length] if safe else "unnamed"
 
-def validate_path_within_dir(file_path: str, allowed_dir: str) -> str:
-    abs_allowed, abs_path = os.path.abspath(allowed_dir), os.path.abspath(file_path)
-    if not abs_path.startswith(abs_allowed + os.sep) and abs_path != abs_allowed: raise ValueError("Path traversal!")
-    return abs_path
-
 def sanitize_html_text(text: str) -> str: return html_module.escape(str(text))
 
 def srt_to_seconds(srt_time_str):
@@ -253,7 +243,6 @@ def get_wide_context(imdb_id, target_start_sec, target_sub_id=None, window_sec=9
         with sqlite3.connect(DB_NAME) as conn:
             cur = conn.cursor()
             if target_sub_id is not None:
-                # Ограничиваем окно по ID субтитра (± 800 фраз), чтобы не захватывать другие версии субтитров этого же фильма
                 cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? AND id BETWEEN ? AND ? ORDER BY start_time ASC", (imdb_id, target_sub_id - 800, target_sub_id + 800))
             else:
                 cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? ORDER BY start_time ASC", (imdb_id,))
@@ -264,7 +253,6 @@ def get_wide_context(imdb_id, target_start_sec, target_sub_id=None, window_sec=9
     for s_id, r_st, r_tx in rows:
         r_sec = srt_to_seconds(r_st)
         if abs(r_sec - target_start_sec) <= window_sec:
-            # Умная локальная дедупликация: не добавлять фразу, если точно такая же прозвучала меньше 5 секунд назад
             if items and any(x['text'] == r_tx and abs(x['sec'] - r_sec) < 5.0 for x in items[-5:]):
                 continue
             items.append({"id": s_id, "sec": r_sec, "time_str": str(r_st)[:8], "text": r_tx})
@@ -308,6 +296,12 @@ def manual_video_search(query, min_duration):
 
 def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params):
     sql = ""
+    # FIX 1: If a specific movie is chosen, IGNORE all other global filters
+    if specific_movie != "Все фильмы":
+        sql += " AND m.title_ru = ?"
+        params.append(specific_movie)
+        return sql
+
     if min_rating > 0:
         sql += " AND m.rating >= ?"; params.append(min_rating)
     if t_type != "Все":
@@ -318,8 +312,7 @@ def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific
         sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
     if genre_filter != "Любой":
         sql += " AND m.genres LIKE ?"; params.append(f"%{genre_filter}%")
-    if specific_movie != "Все фильмы":
-        sql += " AND m.title_ru = ?"; params.append(specific_movie)
+    
     return sql
 
 def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match):
@@ -362,30 +355,45 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
         search_query = " AND ".join(search_terms)
         
     params = [search_query]
+    sql_filters = build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params)
+
+    # FIX 2: Removed the hard LIMIT 2000 from the inner MATCH block to prevent common words
+    # (like "женщина") from getting truncated before the filters are applied.
     sql = f"""
-        WITH top_matches AS (
-            SELECT rowid FROM subtitles_fts WHERE text MATCH ? ORDER BY rank LIMIT 2000
-        ),
-        ranked AS (
+        WITH ranked AS (
             SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode,
                    s.start_time, s.end_time, s.text, m.imdb_id, m.countries, 
                    m.title_original, s.id,
+                   tm.rank AS fts_rank,
                    ROW_NUMBER() OVER (PARTITION BY m.imdb_id, SUBSTR(LTRIM(LOWER(s.text), ' .-,:;!?…"'''), 1, 20) ORDER BY s.start_time ASC) AS rn
-            FROM top_matches tm 
+            FROM subtitles_fts tm 
             JOIN subtitles s ON s.id = tm.rowid 
             JOIN movies m ON s.imdb_id = m.imdb_id 
-            WHERE 1=1
+            WHERE tm.text MATCH ? {sql_filters}
+        ) 
+        SELECT title_ru, year, genres, rating, type, season, episode,
+               start_time, end_time, text, imdb_id, countries, title_original, id
+        FROM ranked WHERE rn = 1 
     """
-    sql += build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params)
-    sql += f") SELECT * FROM ranked WHERE rn = 1 ORDER BY rating DESC LIMIT ? OFFSET ?"
+    
+    # UX Improvement: If looking inside one movie, sort results chronologically by time.
+    # Otherwise, sort by the best rating & FTS relevance.
+    if specific_movie != "Все фильмы":
+        sql += " ORDER BY fts_rank ASC, start_time ASC LIMIT ? OFFSET ?"
+    else:
+        sql += " ORDER BY rating DESC, fts_rank ASC LIMIT ? OFFSET ?"
+        
     params.extend([limit, offset])
 
     try:
         cursor.execute(sql, params)
         rows = cursor.fetchall()
         return [(SearchRow(*row[:14]), 100.0) for row in rows]
-    except: return []
-    finally: conn.close()
+    except Exception as e:
+        logger.error(f"FTS Search Error: {e}")
+        return []
+    finally: 
+        conn.close()
 
 class StreamlitAIWidget:
     def __init__(self, status_container):
@@ -458,14 +466,6 @@ def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_f
             
     return final_results[:limit]
 
-def perform_search(query_text, search_mode, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match, log_widget=None):
-    if not query_text or not query_text.strip(): return []
-    if search_mode == "По словам (Быстро ⚡️)":
-        if log_widget: log_widget.info("⚡ Выполняем точный поиск по базе...")
-        return _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match)
-    else:
-        return []
-
 def cleanup_finished_downloads():
     for task_id, task in list(st.session_state.active_downloads.items()):
         proc = task.get('process')
@@ -506,10 +506,17 @@ with st.sidebar:
     current_movie_idx = all_movies.index(st.session_state["specific_movie"]) if st.session_state.get("specific_movie") in all_movies else 0
 
     st.selectbox("📌 В кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
-    st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change)
-    st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change)
-    st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime"], key="genre_filter", on_change=on_settings_change)
-    st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change)
+    
+    # UX Update: If a specific movie is selected, dim the global filters to show they are inactive
+    filters_disabled = st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы"
+    
+    if filters_disabled:
+        st.caption("*(Глобальные фильтры отключены, так как выбран конкретный фильм)*")
+
+    st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change, disabled=filters_disabled)
+    st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change, disabled=filters_disabled)
+    st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime"], key="genre_filter", on_change=on_settings_change, disabled=filters_disabled)
+    st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change, disabled=filters_disabled)
 
     st.markdown("---")
     st.header("✂️ Хронометраж")
@@ -658,7 +665,6 @@ def render_download_manager():
 
                 with st.container(height=250):
                     for s in subs:
-                        # Если известен точный sub_id - используем его для идеального совпадения, иначе примерное по секундам
                         is_target = (s['id'] == task.get('sub_id')) if task.get('sub_id') else (abs(s['sec'] - task['orig_start_sec']) < 2)
                         prefix = "🎯 " if is_target else "⏱ "
                         
@@ -666,7 +672,7 @@ def render_download_manager():
                             f"{prefix}[{s['time_str']}] {s['text']}",
                             key=f"fix_dl_{task_id}_{s['id']}",
                             use_container_width=True,
-                            type="primary" if is_target else "tertiary" # Красный / акцентный фон для нашей искомой фразы
+                            type="primary" if is_target else "tertiary" 
                         ):
                             new_offset = task['orig_start_sec'] - s['sec']
                             save_source_info(task['imdb_id'], task.get('saved_source') or "", new_offset)
@@ -812,11 +818,13 @@ def render_result_card(row, uid, list_type="search"):
                 else:
                     task_id = f"task_{imdb_id}_{int(time.time())}"
                     expected_file = os.path.join(CLIPS_DIR, f"{sanitize_filename(f'{title}_{year}')}__{sanitize_filename(text_escaped, 25)}_{task_id[-6:]}.mp4")
+                    
+                    # LOGS DIRECTORY FIX
+                    log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
 
                     cmd = [sys.executable, "-u", "magnet_get.py", "--title", str(title), "--orig_title", str(orig_title or ""), "--year", str(safe_int(year)), "--type", str(m_type), "--season", str(safe_int(season)), "--episode", str(safe_int(ep)), "--start", seconds_to_hms(start_sec), "--duration", str(int(duration)), "--source", source_pref, "--output", expected_file]
                     if saved_source: cmd.extend(["--force_source", saved_source])
 
-                    log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt") # <--- NEW
                     log_file_handle = open(log_file_path, "w", encoding="utf-8")
                     process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT, text=True, env=os.environ.copy())
 
@@ -829,7 +837,7 @@ def render_result_card(row, uid, list_type="search"):
                         "_log_handle": log_file_handle, 
                         "status": "running",
                         "imdb_id": imdb_id,
-                        "sub_id": s_id,  # Убедились что передаем точный ID субтитра в менеджер загрузок
+                        "sub_id": s_id, 
                         "orig_start_sec": srt_to_seconds(start_srt),
                         "orig_end_sec": srt_to_seconds(end_srt),
                         "pad_start": pad_start,
@@ -851,7 +859,6 @@ with tab_search:
     if st.session_state.trigger_search:
         st.session_state.trigger_search = False
         
-        # Добавляем в историю перед самим поиском
         add_to_history(st.session_state.last_query, st.session_state.search_mode)
         
         if st.session_state.search_mode == "ИИ-Агент (RAG Пайплайн 🤖)":
@@ -955,7 +962,6 @@ with tab_ai:
     
     c_sel, c_del = st.columns([4, 1])
     with c_sel:
-        # Если вдруг ключ удалился из истории
         if curr_name not in hist_dict:
             curr_name = list(hist_dict.keys())[0] if hist_dict else "Базовый (По умолчанию)"
             
@@ -976,7 +982,6 @@ with tab_ai:
             else:
                 st.error("Базовый промпт удалить нельзя!")
                 
-    # Текстовое поле с редактируемым промптом
     edit_text = st.text_area(
         "📝 Логика генерации (ваша стратегия):", 
         value=hist_dict.get(selected_prompt_name, ""), 
