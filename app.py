@@ -30,26 +30,47 @@ import json
 import logging
 import html as html_module
 from collections import namedtuple
+import atexit
 
 from ai_agent import generate_search_queries, rank_database_results
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    logger.addHandler(handler)
+
+# Track Popen processes and file handles for cleanup on exit
+_active_processes = []
+_active_handles = []
+
+def _cleanup_resources():
+    for proc in _active_processes:
+        if proc and proc.poll() is None:
+            try: proc.terminate()
+            except OSError: pass
+    for h in _active_handles:
+        if h and not h.closed:
+            try: h.close()
+            except OSError: pass
+
+atexit.register(_cleanup_resources)
 
 try:
     import nltk
     from nltk.stem.snowball import SnowballStemmer
     try: nltk.data.find('corpora/wordnet')
-    except: nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True)
+    except Exception: nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True)
     try: nltk.data.find('tokenizers/punkt')
-    except: nltk.download('punkt', quiet=True)
+    except Exception: nltk.download('punkt', quiet=True)
     ru_stemmer = SnowballStemmer("russian")
-except: ru_stemmer = None
+except Exception: ru_stemmer = None
 
 try:
     import pymorphy3
     morph = pymorphy3.MorphAnalyzer()
-except: morph = None
+except Exception: morph = None
 
 DB_NAME = 'movies_master.sqlite'
 CLIPS_DIR = 'clips'
@@ -59,6 +80,13 @@ MAX_ACTIVE_DOWNLOADS = 5
 
 os.makedirs(CLIPS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+def get_db():
+    """Get SQLite connection with WAL mode and row factory."""
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.row_factory = sqlite3.Row
+    return conn
 
 st.markdown("""
     <style>
@@ -76,7 +104,7 @@ st.markdown("""
 SearchRow = namedtuple('SearchRow', ['title_ru', 'year', 'genres', 'rating', 'type', 'season', 'episode', 'start_time', 'end_time', 'text', 'imdb_id', 'countries', 'title_original', 'sub_id'])
 
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn: 
+    with get_db() as conn: 
         conn.execute("CREATE TABLE IF NOT EXISTS favorites (imdb_id TEXT, sub_id INTEGER, added_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY(imdb_id, sub_id))")
         conn.execute("CREATE TABLE IF NOT EXISTS search_history (id INTEGER PRIMARY KEY AUTOINCREMENT, query TEXT, mode TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)")
         
@@ -95,11 +123,11 @@ def init_db():
                     conn.execute("INSERT OR IGNORE INTO movie_bindings VALUES (?, ?)", (r_imdb, r_src))
                     conn.execute("INSERT OR IGNORE INTO source_offsets VALUES (?, ?)", (eff_src, r_off))
                 conn.execute("DROP TABLE movie_sources")
-            except: pass
+            except Exception: pass
 init_db()
 
 def toggle_favorite(imdb_id, sub_id):
-    with sqlite3.connect(DB_NAME) as conn:
+    with get_db() as conn:
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM favorites WHERE imdb_id=? AND sub_id=?", (imdb_id, sub_id))
         if cur.fetchone():
@@ -111,44 +139,44 @@ def toggle_favorite(imdb_id, sub_id):
 
 def get_all_favorites():
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             sql = "SELECT m.title_ru, m.year, m.genres, m.rating, m.type, m.season, m.episode, s.start_time, s.end_time, s.text, m.imdb_id, m.countries, m.title_original, s.id FROM favorites f JOIN subtitles s ON f.sub_id = s.id JOIN movies m ON f.imdb_id = m.imdb_id ORDER BY f.added_at DESC"
             cur = conn.cursor(); cur.execute(sql)
             return [(SearchRow(*row), 100.0) for row in cur.fetchall()]
-    except: return []
+    except Exception: return []
 
 def is_favorite(imdb_id, sub_id):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor(); cur.execute("SELECT 1 FROM favorites WHERE imdb_id=? AND sub_id=?", (imdb_id, sub_id))
             return bool(cur.fetchone())
-    except: return False
+    except Exception: return False
 
 def add_to_history(query, mode):
     if not query or not query.strip(): return
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT query, mode FROM search_history ORDER BY id DESC LIMIT 1")
             row = cur.fetchone()
             if row and row[0] == query and row[1] == mode:
                 return
             conn.execute("INSERT INTO search_history (query, mode) VALUES (?, ?)", (query, mode))
-    except: pass
+    except Exception: pass
 
 def get_search_history(limit=50):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT id, query, mode, datetime(created_at, 'localtime') FROM search_history ORDER BY id DESC LIMIT ?", (limit,))
             return cur.fetchall()
-    except: return []
+    except Exception: return []
 
 def clear_search_history():
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             conn.execute("DELETE FROM search_history")
-    except: pass
+    except Exception: pass
 
 # --- SESSION BASED SETTINGS (No global JSON saving) ---
 DEFAULT_SETTINGS = {
@@ -200,37 +228,37 @@ def srt_to_seconds(srt_time_str):
         elif len(parts) == 2: h, m, s = 0, parts[0], parts[1]
         else: h, m, s = 0, 0, parts[0]
         return h * 3600 + m * 60 + s + int(ms_part) / 1000.0
-    except: return 0.0
+    except (ValueError, IndexError, TypeError): return 0.0
 
 def seconds_to_hms(seconds): return str(datetime.timedelta(seconds=max(0, int(seconds))))
 def safe_int(val, default=0): 
     try: return int(val) if val is not None else default
-    except: return default
+    except (ValueError, TypeError): return default
 
-@st.cache_data
+@st.cache_data(ttl=3600)
 def get_movie_titles():
     try:
-        with sqlite3.connect(DB_NAME) as conn: return pd.read_sql_query("SELECT DISTINCT title_ru FROM movies ORDER BY title_ru ASC", conn)['title_ru'].tolist()
-    except: return []
+        with get_db() as conn: return pd.read_sql_query("SELECT DISTINCT title_ru FROM movies ORDER BY title_ru ASC", conn)['title_ru'].tolist()
+    except Exception: return []
 
 def get_sync_subtitles(imdb_id, anchor_sub_id, phrase=""):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor()
             if phrase:
                 cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? AND text LIKE ? ORDER BY ABS(id - ?) ASC LIMIT 50", (imdb_id, f"%{phrase}%", anchor_sub_id))
             else:
                 cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? AND id BETWEEN ? AND ? ORDER BY start_time", (imdb_id, anchor_sub_id - 20, anchor_sub_id + 20))
             return cur.fetchall()
-    except: return []
+    except Exception: return []
 
 def get_surrounding_context(imdb_id, target_start_sec, target_sub_id, window_sec=90):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT start_time, text FROM subtitles WHERE imdb_id = ? AND id BETWEEN ? AND ? ORDER BY start_time ASC", (imdb_id, target_sub_id - 100, target_sub_id + 100))
             rows = cur.fetchall()
-    except: return []
+    except Exception: return []
     items, seen = [], set()
     for r_st, r_tx in rows:
         r_sec = srt_to_seconds(r_st)
@@ -241,14 +269,14 @@ def get_surrounding_context(imdb_id, target_start_sec, target_sub_id, window_sec
 
 def get_wide_context(imdb_id, target_start_sec, target_sub_id=None, window_sec=900):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor()
             if target_sub_id is not None:
                 cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? AND id BETWEEN ? AND ? ORDER BY start_time ASC", (imdb_id, target_sub_id - 800, target_sub_id + 800))
             else:
                 cur.execute("SELECT id, start_time, text FROM subtitles WHERE imdb_id = ? ORDER BY start_time ASC", (imdb_id,))
             rows = cur.fetchall()
-    except: return []
+    except Exception: return []
     
     items = []
     for s_id, r_st, r_tx in rows:
@@ -262,7 +290,7 @@ def get_wide_context(imdb_id, target_start_sec, target_sub_id=None, window_sec=9
 # --- SOURCE & OFFSET LOGIC REWRITE ---
 def get_saved_source_info(imdb_id):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             cur = conn.cursor()
             cur.execute("SELECT source_id FROM movie_bindings WHERE imdb_id = ?", (imdb_id,))
             row = cur.fetchone()
@@ -275,23 +303,23 @@ def get_saved_source_info(imdb_id):
             offset_sec = row_off[0] if row_off else 0.0
             
             return source_id, offset_sec
-    except: return None, 0.0
+    except Exception: return None, 0.0
 
 def set_movie_source(imdb_id, source_id):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             if source_id:
                 conn.execute("INSERT OR REPLACE INTO movie_bindings VALUES (?, ?)", (imdb_id, source_id))
             else:
                 conn.execute("DELETE FROM movie_bindings WHERE imdb_id = ?", (imdb_id,))
-    except: pass
+    except Exception: pass
 
 def set_source_offset(imdb_id, source_id, offset_sec):
     try:
-        with sqlite3.connect(DB_NAME) as conn:
+        with get_db() as conn:
             eff_src = source_id if source_id else f"auto_{imdb_id}"
             conn.execute("INSERT OR REPLACE INTO source_offsets VALUES (?, ?)", (eff_src, offset_sec))
-    except: pass
+    except Exception: pass
 # ------------------------------------
 
 def manual_video_search(query, min_duration):
@@ -303,8 +331,8 @@ def manual_video_search(query, min_duration):
                 try:
                     v = json.loads(l)
                     if v.get("duration", 0) >= min_duration: res.append({"label": f"🔴 [YT] {v.get('title')} ({seconds_to_hms(v.get('duration'))})", "id": f"youtube:{v.get('id')}"})
-                except: pass
-    except: pass
+                except (json.JSONDecodeError, KeyError): pass
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError): pass
     return res
 
 def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params):
@@ -328,8 +356,12 @@ def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific
 
 def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match):
     if not os.path.exists(DB_NAME): return []
-    try: conn = sqlite3.connect(DB_NAME); cursor = conn.cursor()
-    except: return []
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+    except sqlite3.Error as e:
+        logger.error(f"DB connection error in _search_fts: {e}")
+        return []
 
     if query_text.startswith('"') and query_text.endswith('"'):
         exact_match = True
@@ -351,7 +383,8 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
             if re.search(r'[а-яё]', word):
                 variants = {word}
                 if morph:
-                    lemma = morph.parse(word)[0].normal_form
+                    parsed = morph.parse(word)
+                    lemma = parsed[0].normal_form if parsed else word
                     variants.add(lemma)
                 if ru_stemmer:
                     variants.add(ru_stemmer.stem(word))
@@ -519,7 +552,7 @@ def extract_download_metadata(log_lines):
         elif "Взят файл" in line:
             try:
                 info["exact_file"] = line.split("Взят файл")[1].split(":")[1].split("(ID")[0].strip()
-            except: pass
+            except Exception: pass
     return info
 
 if hasattr(st, "fragment"):
@@ -617,7 +650,7 @@ def render_download_manager():
                 try:
                     with open(task['log_file'], 'r', encoding='utf-8') as f:
                         short_status = get_clean_status_from_log(f.readlines()[-15:])
-                except:
+                except OSError:
                     short_status = "В процессе..."
             else:
                 if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024:
@@ -655,7 +688,7 @@ def render_download_manager():
                             if meta["exact_file"]:
                                 st.markdown(f"**Файл внутри:** `{meta['exact_file']}`")
                             st.markdown("</div>", unsafe_allow_html=True)
-                except: pass
+                except (OSError, IOError): pass
 
             if task['status'] == 'running':
                 proc = task.get('process')
@@ -663,7 +696,7 @@ def render_download_manager():
                     try:
                         with open(task['log_file'], 'r', encoding='utf-8') as f:
                             st.info(get_clean_status_from_log(f.readlines()[-15:]))
-                    except:
+                    except OSError:
                         st.info("⏳ Ожидание логов...")
                     if st.button("Остановить ❌", key=f"stop_{task_id}", use_container_width=True):
                         proc.terminate()
@@ -693,7 +726,7 @@ def render_download_manager():
                         if st.button("Убрать из списка ✖", key=f"clr_{task_id}", use_container_width=True):
                             st.session_state.active_downloads.pop(task_id, None)
                             st.rerun()
-                except:
+                except (OSError, FileNotFoundError, RuntimeError):
                     st.error("Файл не найден")
 
             elif task['status'] == 'stopped':
@@ -760,6 +793,7 @@ def render_download_manager():
                                 cmd.extend(["--force_source", task['saved_source']])
 
                             log_handle = open(task['log_file'], "w", encoding="utf-8")
+                            _active_handles.append(log_handle)
                             new_proc = subprocess.Popen(
                                 cmd, stdout=log_handle, stderr=subprocess.STDOUT,
                                 text=True, env=os.environ.copy()
@@ -790,15 +824,15 @@ def render_result_card(row, uid, list_type="search"):
             clean_q = re.escape(re.sub(r'[^\w\s]', '', q).strip())
             for w in clean_q.split():
                 try: text_html = re.sub(f"(?i)({re.escape(w)})", r'<mark style="background-color: #ffd700; color: #000; padding: 0 4px; border-radius: 4px;"><b>\g<0></b></mark>', text_html)
-                except: pass
+                except re.error: pass
         else:
             for w in re.findall(r'\w+', q):
                 if len(w) > 3:
                     try: text_html = re.sub(f"(?i)({re.escape(w)})[а-яА-Яa-zA-Z]*", r'<mark style="background-color: #ffd700; color: #000; padding: 0 2px; border-radius: 3px;"><b>\g<0></b></mark>', text_html)
-                    except: pass
+                    except re.error: pass
                 else:
                     try: text_html = re.sub(f"(?i)\\b({re.escape(w)})\\b", r'<mark style="background-color: #ffd700; color: #000; padding: 0 2px; border-radius: 3px;"><b>\g<0></b></mark>', text_html)
-                    except: pass
+                    except re.error: pass
 
     with st.container(border=True):
         c_head1, c_head2 = st.columns([5, 1])
@@ -896,7 +930,9 @@ def render_result_card(row, uid, list_type="search"):
                     if saved_source: cmd.extend(["--force_source", saved_source])
 
                     log_file_handle = open(log_file_path, "w", encoding="utf-8")
+                    _active_handles.append(log_file_handle)
                     process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT, text=True, env=os.environ.copy())
+                    _active_processes.append(process)
 
                     st.session_state.active_downloads[task_id] = {
                         "title": f"{display_title} [{str(start_srt)[:8]}]", 
@@ -1077,6 +1113,6 @@ with tab_ai:
                 st.rerun()
 
 
-if count_running_downloads() > 0:
-    time.sleep(1.5)
-    st.rerun()
+# Download status updates handled by auto_updating_fragment (run_every=2s)
+# No script-level rerun needed — avoids infinite loop
+pass
