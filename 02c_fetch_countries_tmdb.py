@@ -1,10 +1,15 @@
 import sqlite3
+import os
+import sys
 import requests
 import time
 from tqdm import tqdm
 
 DB_NAME = 'movies_master.sqlite'
-API_KEY = "TMDB_API_KEY_PLACEHOLDER"
+API_KEY = os.environ.get("TMDB_API_KEY", "")
+if not API_KEY:
+    print("❌ TMDB_API_KEY not set in environment. Set it in .env file.")
+    sys.exit(1)
 BASE_URL = "https://api.themoviedb.org/3"
 
 def fetch_country_from_tmdb(imdb_id):
