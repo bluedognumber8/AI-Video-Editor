@@ -41,8 +41,8 @@ LLM_MODELS_FALLBACK = [
     "openrouter/auto"
 ]
 
-CACHE_FILE = "last_ai_model.json"
-PROMPTS_FILE = "prompts_history.json"
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ai_model.json")
+PROMPTS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts_history.json")
 
 # ==========================================
 # СИСТЕМА УПРАВЛЕНИЯ ПРОМПТАМИ
@@ -66,7 +66,7 @@ def load_prompts():
         try:
             with open(PROMPTS_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except: pass
+        except (json.JSONDecodeError, KeyError): pass
     return {"current": "Базовый (По умолчанию)", "history": {"Базовый (По умолчанию)": DEFAULT_PROMPT}}
 
 def save_prompts(data):
@@ -74,7 +74,7 @@ def save_prompts(data):
     try:
         with open(PROMPTS_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except: pass
+    except (OSError, IOError): pass
 
 def get_active_prompt():
     """Возвращает текущий активный промпт без JSON суффикса"""
@@ -95,19 +95,29 @@ def get_best_model_order():
                 if last_model in models:
                     models.remove(last_model)
                     models.insert(0, last_model)
-        except: pass
+        except (json.JSONDecodeError, KeyError, FileNotFoundError): pass
     return models
 
 def save_working_model(model_name):
     try:
         with open(CACHE_FILE, "w") as f: json.dump({"last_working_model": model_name}, f)
-    except: pass
+    except OSError: pass
 
 class DummyWidget:
     def info(self, msg): print(f"[INFO] {msg}")
     def success(self, msg): print(f"[SUCCESS] {msg}")
     def warning(self, msg): print(f"[WARNING] {msg}")
     def error(self, msg): print(f"[ERROR] {msg}")
+
+def _extract_content(response_json):
+    """Safely extract content from OpenRouter-compatible response JSON."""
+    try:
+        choices = response_json.get('choices', [])
+        if choices:
+            return choices[0].get('message', {}).get('content', '').strip()
+    except (KeyError, IndexError, AttributeError, TypeError):
+        pass
+    return None
 
 def call_openrouter(system_prompt, user_prompt, log_widget=None):
     widget = log_widget if log_widget else DummyWidget()
@@ -129,10 +139,13 @@ def call_openrouter(system_prompt, user_prompt, log_widget=None):
             if resp.status_code == 200:
                 widget.success(f"✅ Модель `{CUSTOM_MODEL_NAME}` (кастомный эндпоинт) ответила!")
                 save_working_model(CUSTOM_MODEL_NAME)
-                return resp.json()['choices'][0]['message']['content'].strip()
+                content = _extract_content(resp.json())
+                if content:
+                    return content
+                widget.warning(f"⚠️ Кастомный эндпоинт вернул неожиданный формат: {resp.text[:200]}")
             else:
                 try: err = resp.json().get("error", {}).get("message", resp.text)
-                except: err = resp.text
+                except json.JSONDecodeError: err = resp.text
                 widget.warning(f"⚠️ Кастомный эндпоинт отказал {resp.status_code}: {err}")
         except Exception as e:
             widget.warning(f"⚠️ Кастомный эндпоинт недоступен: {str(e)}")
@@ -149,8 +162,14 @@ def call_openrouter(system_prompt, user_prompt, log_widget=None):
     }
     
     models_to_try = get_best_model_order()
+    start_time = time.time()
+    MAX_TOTAL_WAIT = 120  # seconds total budget for all model attempts
 
     for model in models_to_try:
+        if time.time() - start_time > MAX_TOTAL_WAIT:
+            widget.warning(f"⏰ Исчерпан общий бюджет времени ({MAX_TOTAL_WAIT}с). Прерываем перебор.")
+            break
+            
         widget.info(f"⏳ Стучимся в модель: `{model}`...")
         payload = {"model": model, "messages": [{"role": "user", "content": combined_prompt}]}
         
@@ -159,14 +178,23 @@ def call_openrouter(system_prompt, user_prompt, log_widget=None):
             if resp.status_code == 200:
                 widget.success(f"✅ Модель `{model}` ответила!")
                 save_working_model(model)
-                return resp.json()['choices'][0]['message']['content'].strip()
+                content = _extract_content(resp.json())
+                if content:
+                    return content
+                widget.warning(f"⚠️ Модель `{model}` вернула неожиданный формат")
             elif resp.status_code == 429: 
                 widget.warning(f"⚠️ Очередь переполнена (429), пробуем следующую...")
                 time.sleep(1)
             else:
                 try: err = resp.json().get("error", {}).get("message", resp.text)
-                except: err = resp.text
+                except json.JSONDecodeError: err = resp.text
                 widget.warning(f"⚠️ Отказ {resp.status_code}: {err}")
+        except requests.Timeout:
+            widget.warning(f"⚠️ Таймаут модели {model} (25с)")
+            continue
+        except requests.ConnectionError as e:
+            widget.warning(f"⚠️ Ошибка соединения: {str(e)}")
+            continue
         except Exception as e:
             widget.warning(f"⚠️ Ошибка сети: {str(e)}")
             continue
@@ -188,7 +216,7 @@ def generate_search_queries(query_text, log_widget=None):
             clean = re.sub(r'```json\n?|```\n?', '', response).strip()
             queries = json.loads(clean)
             if isinstance(queries, list): return queries
-        except: 
+        except (json.JSONDecodeError, ValueError):
             widget.error("❌ ИИ сломал формат JSON.")
     return []
 
@@ -209,7 +237,7 @@ def rank_database_results(user_query, fts_results, log_widget=None):
             clean = re.sub(r'```json\n?|```\n?', '', response).strip()
             best_ids = json.loads(clean)
             if isinstance(best_ids, list): return [int(x) for x in best_ids]
-        except: pass
+        except (json.JSONDecodeError, ValueError, TypeError): pass
     return [item['id'] for item in fts_results[:5]]
 
 if __name__ == "__main__":
