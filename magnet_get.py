@@ -18,14 +18,15 @@ import re
 import logging
 import tempfile
 import shutil
+import atexit
+import signal
 
-# WHY: структурированное логирование вместо print
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+    logger.addHandler(handler)
 
 # WHY: загружаем .env если есть python-dotenv
 try:
@@ -66,9 +67,23 @@ CONFIG = {
     },
     "clip": {
         "output_folder": "clips",
+        "ffmpeg_timeout": 180,
     },
     "domains": ["rutracker.org", "rutracker.net", "rutracker.nl"],
 }
+
+# Track engine instances for cleanup on exit
+_engines = []
+def _cleanup_engines():
+    for e in _engines:
+        try: e.stop()
+        except Exception: pass
+atexit.register(_cleanup_engines)
+def _signal_handler(signum, frame):
+    _cleanup_engines()
+    sys.exit(1)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 # =====================================================================
@@ -177,11 +192,20 @@ def load_cookies(session):
     if os.path.exists(cookie_file):
         try:
             with open(cookie_file, 'r', encoding='utf-8') as f:
-                cookies = json.load(f)
-                for name, value in cookies.items():
-                    session.cookies.set(name, value)
+                cookies_data = json.load(f)
+                if isinstance(cookies_data, dict):
+                    # Legacy format: flat dict name→value
+                    for name, value in cookies_data.items():
+                        session.cookies.set(name, value)
+                elif isinstance(cookies_data, list):
+                    # New format: list of cookie dicts with metadata
+                    for c in cookies_data:
+                        session.cookies.set(c["name"], c["value"],
+                            domain=c.get("domain", ""),
+                            path=c.get("path", "/"),
+                            secure=c.get("secure", False))
                 return True
-        except (json.JSONDecodeError, IOError) as e:
+        except (json.JSONDecodeError, IOError, KeyError) as e:
             logger.warning(f"Ошибка загрузки cookies: {e}")
     return False
 
@@ -190,7 +214,16 @@ def save_cookies(session):
     cookie_file = CONFIG["rutracker"]["cookie_file"]
     try:
         with open(cookie_file, 'w', encoding='utf-8') as f:
-            json.dump(dict(session.cookies), f, ensure_ascii=False)
+            cookie_list = []
+            for cookie in session.cookies:
+                cookie_list.append({
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "secure": cookie.secure
+                })
+            json.dump(cookie_list, f, ensure_ascii=False, indent=2)
     except IOError as e:
         logger.error(f"Ошибка сохранения cookies: {e}")
 
@@ -332,7 +365,7 @@ def try_youtube(query, start_time, duration_secs, output_path):
                         url = f"https://www.youtube.com/watch?v={v.get('id')}"
                         return do_stream_download(url, start_time, duration_secs, output_path, "youtube")
                 except json.JSONDecodeError: continue
-    except: pass
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError): pass
     return False
 
 
@@ -355,7 +388,7 @@ def try_rutube(query, start_time, duration_secs, output_path):
                     if not video_url.startswith("http"): video_url = "https://rutube.ru" + video_url
                     logger.info(f"  ВЫБРАНО ВИДЕО: {v.get('title', 'Без названия')}")
                     return do_stream_download(video_url, start_time, duration_secs, output_path, "rutube")
-    except: pass
+    except (requests.RequestException, json.JSONDecodeError, OSError): pass
     return False
 
 
@@ -377,6 +410,8 @@ class TorrServerEngine:
                 self.port = 8090
                 self.base_url = f"http://127.0.0.1:{self.port}"
                 self.use_system = True
+                # Register for cleanup
+                _engines.append(self)
                 return
         except requests.ConnectionError:
             pass
@@ -386,6 +421,8 @@ class TorrServerEngine:
         self.port = get_free_port()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.db_dir = tempfile.mkdtemp(prefix=f"ts_db_{self.port}_")
+        # Register for cleanup
+        _engines.append(self)
 
     def start(self):
         if self.use_system:
@@ -417,7 +454,7 @@ class TorrServerEngine:
         if self.process:
             self.process.terminate()
             try: self.process.wait(timeout=5)
-            except: self.process.kill()
+            except (OSError, subprocess.TimeoutExpired): self.process.kill()
             self.process = None
             
         if hasattr(self, 'log_file_handle') and self.log_file_handle and not self.log_file_handle.closed:
@@ -425,6 +462,12 @@ class TorrServerEngine:
 
         if self.db_dir:
             shutil.rmtree(self.db_dir, ignore_errors=True)
+
+    def __del__(self):
+        """Safety net: cleanup if stop() was not called."""
+        if self.db_dir and os.path.exists(self.db_dir):
+            try: shutil.rmtree(self.db_dir, ignore_errors=True)
+            except Exception: pass
 
     def add_torrent(self, torrent_path):
         logger.info("Загрузка торрента в сервер...")
@@ -438,7 +481,7 @@ class TorrServerEngine:
             
             try: 
                 t_hash = resp.json().get("hash", "")
-            except: 
+            except (json.JSONDecodeError, KeyError, IndexError): 
                 text = resp.text
                 t_hash = text.split("btih:")[1].split("&")[0] if "btih:" in text else text.strip('" \n')
             
@@ -450,7 +493,7 @@ class TorrServerEngine:
         try:
             requests.post(f"{self.base_url}/torrents", json={"action": "rem", "hash": torrent_hash}, timeout=2)
             logger.info("🧹 Торрент удален из базы сервера.")
-        except:
+        except (requests.RequestException, KeyError):
             pass
 
     def find_file_index(self, torrent_path, target_season, target_episode):
@@ -557,7 +600,7 @@ class TorrServerEngine:
         
         try:
             # Щедрый таймаут, так как FFmpeg "разбудит" сервер и заставит его искать пиров
-            result = subprocess.run(ffmpeg_cmd, timeout=180)
+            result = subprocess.run(ffmpeg_cmd, timeout=CONFIG["clip"]["ffmpeg_timeout"])
             
             if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
                 return True
@@ -648,16 +691,16 @@ def try_torrent(query, start_time, duration_secs, output_path, target_season, ta
         title = title_tag.text.strip()
 
         try: seeds = int(row.select_one(".seedmed").text.strip())
-        except: seeds = 0
+        except (AttributeError, ValueError, TypeError): seeds = 0
 
         try: size_gb = int(row.select_one(".tor-size")["data-ts_text"]) / (1024 ** 3)
-        except: size_gb = 0
+        except (AttributeError, ValueError, TypeError, KeyError): size_gb = 0
 
         if seeds >= CONFIG["search"]["min_seeds"]:
             score = evaluate_torrent(title, seeds, size_gb, is_tv)
             if score > 0:
                 try: tid = title_tag["href"].split("t=")[1].split("&")[0]
-                except: continue
+                except (IndexError, KeyError, ValueError): continue
                 valid_torrents.append({
                     "topic_id": tid, "title": title, "score": score,
                     "seeds": seeds, "size_gb": round(size_gb, 1)
