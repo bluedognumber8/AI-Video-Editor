@@ -457,9 +457,9 @@ def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_f
 
     ai_logger.success(f"Найдено {len(raw_results)} потенциальных совпадений (кандидатов).")
 
-    pool_size = 60
+    pool_size = 200
     st_status_box.update(label=f"⚖️ ИИ отсматривает {len(raw_results[:pool_size])} сцен...", state="running")
-    ai_logger.info("Шаг 3: Отправляем кандидатов обратно в ИИ для оценки контекста...")
+    ai_logger.info(f"Шаг 3: Отправляем {len(raw_results[:pool_size])} кандидатов обратно в ИИ для оценки контекста...")
     
     candidates_for_ai = [{"id": idx, "genre": r[0].genres, "text": r[0].text} for idx, r in enumerate(raw_results[:pool_size])]
     best_indices = rank_database_results(query_text, candidates_for_ai, ai_logger)
