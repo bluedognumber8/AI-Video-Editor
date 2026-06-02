@@ -15,6 +15,9 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+CUSTOM_API_BASE_URL = os.environ.get("CUSTOM_API_BASE_URL", "")
+CUSTOM_MODEL_NAME = os.environ.get("CUSTOM_MODEL_NAME", "")
+CUSTOM_API_KEY = os.environ.get("CUSTOM_API_KEY", "")
 
 LLM_MODELS_FALLBACK = [
     "nousresearch/hermes-3-llama-3.1-405b:free",
@@ -108,6 +111,32 @@ class DummyWidget:
 
 def call_openrouter(system_prompt, user_prompt, log_widget=None):
     widget = log_widget if log_widget else DummyWidget()
+    if not OPENROUTER_API_KEY and not (CUSTOM_API_BASE_URL and CUSTOM_MODEL_NAME):
+        widget.error("❌ OPENROUTER_API_KEY не задан и кастомный эндпоинт не настроен.")
+        return None
+
+    combined_prompt = f"ИНСТРУКЦИЯ:\n{system_prompt}\n\nЗАДАЧА:\n{user_prompt}"
+
+    if CUSTOM_API_BASE_URL and CUSTOM_MODEL_NAME:
+        widget.info(f"⏳ Стучимся в кастомный эндпоинт: `{CUSTOM_MODEL_NAME}`...")
+        custom_headers = {"Content-Type": "application/json"}
+        if CUSTOM_API_KEY:
+            custom_headers["Authorization"] = f"Bearer {CUSTOM_API_KEY}"
+        payload = {"model": CUSTOM_MODEL_NAME, "messages": [{"role": "user", "content": combined_prompt}]}
+        try:
+            endpoint_url = f"{CUSTOM_API_BASE_URL.rstrip('/')}/chat/completions"
+            resp = requests.post(endpoint_url, headers=custom_headers, data=json.dumps(payload), timeout=25)
+            if resp.status_code == 200:
+                widget.success(f"✅ Модель `{CUSTOM_MODEL_NAME}` (кастомный эндпоинт) ответила!")
+                save_working_model(CUSTOM_MODEL_NAME)
+                return resp.json()['choices'][0]['message']['content'].strip()
+            else:
+                try: err = resp.json().get("error", {}).get("message", resp.text)
+                except: err = resp.text
+                widget.warning(f"⚠️ Кастомный эндпоинт отказал {resp.status_code}: {err}")
+        except Exception as e:
+            widget.warning(f"⚠️ Кастомный эндпоинт недоступен: {str(e)}")
+
     if not OPENROUTER_API_KEY:
         widget.error("❌ OPENROUTER_API_KEY не задан.")
         return None
@@ -119,7 +148,6 @@ def call_openrouter(system_prompt, user_prompt, log_widget=None):
         "X-Title": "AI Director"
     }
     
-    combined_prompt = f"ИНСТРУКЦИЯ:\n{system_prompt}\n\nЗАДАЧА:\n{user_prompt}"
     models_to_try = get_best_model_order()
 
     for model in models_to_try:

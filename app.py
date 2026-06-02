@@ -12,12 +12,6 @@ st.set_page_config(
 )
 
 # Simple authentication
-from auth import check_password
-
-# Check password - if False, stops here and shows login
-if not check_password():
-    st.stop()
-
 from dotenv import load_dotenv
 load_dotenv()
 import os
