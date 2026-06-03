@@ -42,7 +42,7 @@ def create_launchers(os_name):
             f.write("pause\n")
         with open("update.bat", "w", encoding="utf-8") as f:
             f.write("@echo off\necho 🔄 Updating AI Video Editor...\n")
-            f.write("git fetch\ngit reset --hard @{u}\n") 
+            f.write("git fetch\ngit reset --hard @{upstream}\n") 
             f.write("echo ⚙️ Re-checking dependencies...\n")
             f.write(f'"{py_exec}" install.py\npause\n')
         print("✅ Created 'start.bat' and 'update.bat'")
@@ -54,7 +54,7 @@ def create_launchers(os_name):
         with open("update.sh", "w", encoding="utf-8") as f:
             f.write("#!/bin/bash\n")
             f.write('echo "🔄 Updating AI Video Editor..."\n')
-            f.write("git fetch\ngit reset --hard @{u}\n") 
+            f.write("git fetch\ngit reset --hard @{upstream}\n") 
             f.write('echo "⚙️ Re-checking dependencies..."\n')
             f.write(f'"{py_exec}" install.py\n')
             f.write('echo "✅ Update complete!"\n')
@@ -95,7 +95,9 @@ def setup_python_venv():
     run_cmd([pip_cmd, "install", "-r", "requirements.txt"])
     
     print("Downloading NLTK language models into venv...")
-    run_cmd([py_cmd, "-c", "import nltk; nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True); nltk.download('punkt', quiet=True); nltk.download('punkt_tab', quiet=True)"])
+    run_cmd([py_cmd, "-c", "import nltk; nltk.download('wordnet', quiet=True); nltk.download('omw-1.4', quiet=True); nltk.download('punkt', quiet=True)"])
+    # punkt_tab is only available in NLTK >= 3.9; try but don't fail on older versions
+    run_cmd([py_cmd, "-c", "import nltk; nltk.download('punkt_tab', quiet=True)"])
 
 
 # ==========================================
@@ -127,7 +129,11 @@ def install_standard():
 
     if not shutil.which("ffmpeg"):
         if os_name == "Windows": run_cmd("winget install -e --id Gyan.FFmpeg", shell=True)
-        elif os_name == "Darwin": run_cmd(["brew", "install", "ffmpeg"])
+        elif os_name == "Darwin":
+            if shutil.which("brew"):
+                run_cmd(["brew", "install", "ffmpeg"])
+            else:
+                print("⚠️  Homebrew not found. Install ffmpeg manually: brew install ffmpeg")
         elif shutil.which("apt"):
             run_cmd(["sudo", "apt", "update"])
             run_cmd(["sudo", "apt", "install", "-y", "ffmpeg"])
