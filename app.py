@@ -1428,8 +1428,12 @@ with tab_url_dl:
 
 # ── Вкладка: Скачать по названию ──
 with tab_title_dl:
+    def sec_to_hms(s):
+        s = int(s)
+        return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+
     st.markdown("### 🔎 Скачать по названию")
-    st.caption("Найти и скачать полное видео по названию фильма/сериала с RuTube или через торренты (RuTracker).")
+    st.caption("Найти и скачать видео по названию фильма/сериала с RuTube или через торренты (RuTracker).")
 
     title_query = st.text_input(
         "Название фильма или сериала",
@@ -1453,8 +1457,50 @@ with tab_title_dl:
         help="best — максимальное доступное"
     )
 
+    title_full = st.checkbox("📦 Полное видео (без обрезки)", value=True, key="title_dl_full",
+                             help="Скачать целиком. Снимите галочку, чтобы вырезать фрагмент.")
+
+    if not title_full:
+        st.markdown("**⏱ Параметры обрезки**")
+        c_h, c_m, c_s, c_dur = st.columns([1.2, 1.2, 1.2, 4])
+        with c_h:
+            title_start_h = st.number_input("чч", min_value=0, max_value=23, value=0, label_visibility="collapsed", key="title_start_h")
+        with c_m:
+            title_start_m = st.number_input("мм", min_value=0, max_value=59, value=1, label_visibility="collapsed", key="title_start_m")
+        with c_s:
+            title_start_s = st.number_input("сс", min_value=0, max_value=59, value=0, label_visibility="collapsed", key="title_start_s")
+        with c_dur:
+            title_dur_sec = st.number_input("Длительность (сек)", min_value=1, max_value=86400, value=60, step=5, key="title_dur")
+
+        with st.expander("⚙️ Дополнительно"):
+            title_pad = st.number_input(
+                "Захватить раньше начала (сек)", min_value=0, max_value=300,
+                value=2, step=1, key="title_pad",
+                help="Добавит N секунд до указанного времени — пространство для монтажных склеек"
+            )
+            start_total = title_start_h*3600 + title_start_m*60 + title_start_s
+            st.caption("Фактический отрезок будет расширен на N секунд влево. "
+                       f"Итог: **`{sec_to_hms(max(0, start_total - title_pad))}`** → "
+                       f"**`{sec_to_hms(start_total + title_dur_sec)}`**")
+    else:
+        title_start_h = 0; title_start_m = 0; title_start_s = 0
+        title_dur_sec = 0; title_pad = 0
+
+    # Кнопка открыть папку
+    if st.button("📂 Открыть папку со всеми клипами", use_container_width=False, key="title_open_folder"):
+        abs_path = os.path.abspath(CLIPS_DIR)
+        if sys.platform == "win32":
+            os.startfile(abs_path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", abs_path])
+        else:
+            subprocess.Popen(["xdg-open", abs_path])
+
+    st.markdown("---")
+
+    can_download = bool(title_query and title_query.strip())
     if st.button("🔍 Найти и скачать", type="primary", use_container_width=True, key="title_dl_btn",
-                 disabled=not bool(title_query and title_query.strip())):
+                 disabled=not can_download):
         if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
             st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
         else:
@@ -1463,14 +1509,28 @@ with tab_title_dl:
             expected_file = os.path.join(CLIPS_DIR, f"title_{sanitized_name}_{task_id[-6:]}.mp4")
             log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
 
-            cmd = [
-                sys.executable, "-u", "magnet_get.py",
-                "--title", title_query.strip(),
-                "--source", title_source,
-                "--format", title_quality,
-                "--full",
-                "--output", expected_file
-            ]
+            if title_full:
+                cmd = [
+                    sys.executable, "-u", "magnet_get.py",
+                    "--title", title_query.strip(),
+                    "--source", title_source,
+                    "--format", title_quality,
+                    "--full",
+                    "--output", expected_file
+                ]
+            else:
+                raw_start = title_start_h*3600 + title_start_m*60 + title_start_s
+                actual_start = max(0, raw_start - title_pad)
+                actual_dur = title_dur_sec + (raw_start - actual_start)
+                cmd = [
+                    sys.executable, "-u", "magnet_get.py",
+                    "--title", title_query.strip(),
+                    "--source", title_source,
+                    "--format", title_quality,
+                    "--start", sec_to_hms(actual_start),
+                    "--duration", str(actual_dur),
+                    "--output", expected_file
+                ]
 
             log_file_handle = open(log_file_path, "w", encoding="utf-8")
             _active_handles.append(log_file_handle)
