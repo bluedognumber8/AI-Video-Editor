@@ -778,6 +778,9 @@ with st.sidebar:
 
 search_container = st.container()
 with search_container:
+    downloads_active = any(d.get("status") == "running" for d in st.session_state.active_downloads.values())
+    if downloads_active:
+        st.caption("⏳ Поиск временно недоступен — дождитесь завершения загрузок.")
     c_search, c_opt, c_btn = st.columns([5, 1, 1])
     with c_search:
         st.text_input(
@@ -786,6 +789,7 @@ with search_container:
             key="search_query_input",
             on_change=trigger_new_search,
             label_visibility="collapsed",
+            disabled=downloads_active,
         )
     with c_opt:
         st.checkbox(
@@ -795,7 +799,7 @@ with search_container:
             help="Искать ТОЛЬКО введённые слова целиком, без словоформ, окончаний и склонений. Полезно для редких имён и терминов.",
         )
     with c_btn:
-        if st.button("🚀 Найти", use_container_width=True, type="primary"):
+        if st.button("🚀 Найти", use_container_width=True, type="primary", disabled=downloads_active):
             trigger_new_search()
 
 def _status_badge(status):
