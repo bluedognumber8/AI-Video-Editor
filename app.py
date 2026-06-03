@@ -1170,6 +1170,20 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
+            # ── Смотреть видео в браузере ──
+            vid_search_q = f"{title} {year}" if m_type != "tv" else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}"
+            vid_search_url = f"https://www.youtube.com/results?search_query={vid_search_q.replace(' ', '+')}+фильм"
+            st.markdown(
+                f'<a href="{vid_search_url}" target="_blank" style="display:block; text-align:center; '
+                f'padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.06); '
+                f'color:#ccc; text-decoration:none; font-size:14px; margin-top:6px; border:1px solid rgba(255,255,255,0.1); '
+                f'transition:all 0.15s;" '
+                f'onmouseover="this.style.background=\'rgba(255,255,255,0.12)\'; this.style.color=\'white\';" '
+                f'onmouseout="this.style.background=\'rgba(255,255,255,0.06)\'; this.style.color=\'#ccc\';">'
+                f'▶️ Смотреть на YouTube</a>',
+                unsafe_allow_html=True,
+            )
+
 tab_search, tab_favs, tab_history, tab_ai, tab_url_dl, tab_title_dl, tab_vault = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке", "🔎 Скачать по названию", "💾 Мои видео"])
 
 with tab_search:
