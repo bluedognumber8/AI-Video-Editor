@@ -1170,17 +1170,34 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
-            # ── Смотреть видео в браузере ──
-            vid_search_q = f"{title} {year}" if m_type != "tv" else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}"
+            # ── Смотреть видео в браузере (с таймкодом если есть привязанный источник) ──
+            start_sec_for_link = int(srt_to_seconds(start_srt))
             src_pref = st.session_state.get("source_pref", "all")
-            if src_pref == "youtube":
-                vid_search_url = f"https://www.youtube.com/results?search_query={vid_search_q.replace(' ', '+')}+фильм"
-                btn_label = "▶️ Смотреть на YouTube"
+
+            if saved_source and ":" in str(saved_source):
+                s_type, s_id = str(saved_source).split(":", 1)
+                if s_type == "youtube" and s_id:
+                    vid_url = f"https://www.youtube.com/watch?v={s_id}&t={start_sec_for_link}s"
+                    btn_label = "▶️ Смотреть на YouTube"
+                elif s_type == "rutube" and s_id:
+                    vid_url = f"{s_id}?t={start_sec_for_link}"
+                    btn_label = "📺 Смотреть на RuTube"
+                else:
+                    vid_url = None
             else:
-                vid_search_url = f"https://rutube.ru/search/video/?query={vid_search_q.replace(' ', '+')}+фильм"
-                btn_label = "📺 Смотреть на RuTube"
+                vid_url = None
+
+            if not vid_url:
+                vid_search_q = f"{title} {year}" if m_type != "tv" else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}"
+                if src_pref == "youtube":
+                    vid_url = f"https://www.youtube.com/results?search_query={vid_search_q.replace(' ', '+')}+фильм"
+                    btn_label = "▶️ Смотреть на YouTube"
+                else:
+                    vid_url = f"https://rutube.ru/search/video/?query={vid_search_q.replace(' ', '+')}+фильм"
+                    btn_label = "📺 Смотреть на RuTube"
+
             st.markdown(
-                f'<a href="{vid_search_url}" target="_blank" style="display:block; text-align:center; '
+                f'<a href="{vid_url}" target="_blank" style="display:block; text-align:center; '
                 f'padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.06); '
                 f'color:#ccc; text-decoration:none; font-size:14px; margin-top:6px; border:1px solid rgba(255,255,255,0.1); '
                 f'transition:all 0.15s;" '
