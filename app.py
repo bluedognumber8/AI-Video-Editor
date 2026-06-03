@@ -507,50 +507,60 @@ def manual_video_search(query, min_duration):
     return res
 
 
-def search_watch_video(query, min_duration):
-    """Find a video URL on YouTube or RuTube (whichever has a match first). Returns {source, id, label} or None."""
-    # YouTube via yt-dlp
-    try:
-        sub = subprocess.run(
-            ["yt-dlp", f"ytsearch5:{query}", "--dump-json", "--no-warnings"],
-            capture_output=True, text=True, timeout=15
-        )
-        for line in sub.stdout.strip().split("\n"):
-            if line.strip():
-                try:
-                    v = json.loads(line)
-                    if v.get("duration", 0) >= min_duration:
-                        return {"source": "youtube", "id": v.get("id"), "label": v.get("title")}
-                except (json.JSONDecodeError, KeyError):
-                    continue
-    except (subprocess.TimeoutExpired, OSError):
-        pass
+def search_watch_video(query, min_duration, source_pref="all"):
+    """Search for a video URL respecting source preference.
+    source_pref='youtube' → YouTube only, 'rutube' → RuTube only, else → both (RuTube first)."""
+    sources_to_try = []
+    if source_pref == "youtube":
+        sources_to_try = ["youtube"]
+    elif source_pref == "rutube":
+        sources_to_try = ["rutube"]
+    else:
+        sources_to_try = ["rutube", "youtube"]  # RuTube first for torrent/all
 
-    # RuTube via API
-    try:
-        encoded = urllib.parse.quote(query)
-        resp = requests.get(
-            f"https://rutube.ru/api/search/video/?query={encoded}",
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=10
-        )
-        for v in resp.json().get("results", []):
-            dur = v.get("duration", 0)
-            if isinstance(dur, str) and ":" in dur:
-                parts = list(map(int, dur.split(":")))
-                dur = parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
-            else:
-                try:
-                    dur = int(dur)
-                except (ValueError, TypeError):
-                    dur = 0
-            if dur >= min_duration:
-                video_url = v.get("video_url", "")
-                if video_url and not video_url.startswith("http"):
-                    video_url = "https://rutube.ru" + video_url
-                if video_url:
-                    return {"source": "rutube", "id": video_url, "label": v.get("title")}
-    except (requests.RequestException, json.JSONDecodeError, OSError):
-        pass
+    for src in sources_to_try:
+        if src == "youtube":
+            try:
+                sub = subprocess.run(
+                    ["yt-dlp", f"ytsearch5:{query}", "--dump-json", "--no-warnings"],
+                    capture_output=True, text=True, timeout=15
+                )
+                for line in sub.stdout.strip().split("\n"):
+                    if line.strip():
+                        try:
+                            v = json.loads(line)
+                            if v.get("duration", 0) >= min_duration:
+                                return {"source": "youtube", "id": v.get("id"), "label": v.get("title")}
+                        except (json.JSONDecodeError, KeyError):
+                            continue
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+        elif src == "rutube":
+            try:
+                encoded = urllib.parse.quote(query)
+                resp = requests.get(
+                    f"https://rutube.ru/api/search/video/?query={encoded}",
+                    headers={"User-Agent": "Mozilla/5.0"}, timeout=10
+                )
+                for v in resp.json().get("results", []):
+                    dur = v.get("duration", 0)
+                    if isinstance(dur, str) and ":" in dur:
+                        parts = list(map(int, dur.split(":")))
+                        dur = parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
+                    else:
+                        try:
+                            dur = int(dur)
+                        except (ValueError, TypeError):
+                            dur = 0
+                    if dur >= min_duration:
+                        video_url = v.get("video_url", "")
+                        if video_url and not video_url.startswith("http"):
+                            video_url = "https://rutube.ru" + video_url
+                        if video_url:
+                            return {"source": "rutube", "id": video_url, "label": v.get("title")}
+            except (requests.RequestException, json.JSONDecodeError, OSError):
+                pass
 
     return None
 
@@ -1261,13 +1271,14 @@ def render_result_card(row, uid, list_type="search"):
                     unsafe_allow_html=True,
                 )
             else:
-                # 3) Ничего нет → кнопка поиска на лету
+                # 3) Ничего нет → кнопка поиска на лету (учитывает выбранный источник)
                 if st.button("🔍 Найти и открыть видео", key=f"watch_find_{list_type}_{uid}",
                              use_container_width=True):
                     search_q = (f"{title} {year}" if m_type != "tv"
                                 else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}")
+                    src_pref = st.session_state.get("source_pref", "all")
                     with st.spinner("🔎 Ищем видео..."):
-                        found = search_watch_video(search_q, start_sec_for_link + 30)
+                        found = search_watch_video(search_q, start_sec_for_link + 30, source_pref=src_pref)
                     if found:
                         st.session_state[watch_cache_key] = found
                         st.rerun()
