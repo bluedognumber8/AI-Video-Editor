@@ -282,7 +282,7 @@ def clear_search_history():
 # --- SESSION BASED SETTINGS ---
 DEFAULT_SETTINGS = {
     "search_mode": "По словам (Быстро ⚡️)", "specific_movie": "Все фильмы",
-    "t_type": "Все", "c_filter": "Все", "genre_filter": "Любой",
+    "t_type": "Все", "c_filter": "Все", "genre_include": [], "genre_exclude": [],
     "min_rating": 0.0, "pad_start": 30.0, "pad_end": 30.0, "source_pref": "all"
 }
 
@@ -293,7 +293,8 @@ def save_settings():
         "specific_movie": st.session_state.get("specific_movie", DEFAULT_SETTINGS["specific_movie"]),
         "t_type": st.session_state.get("t_type", DEFAULT_SETTINGS["t_type"]),
         "c_filter": st.session_state.get("c_filter", DEFAULT_SETTINGS["c_filter"]),
-        "genre_filter": st.session_state.get("genre_filter", DEFAULT_SETTINGS["genre_filter"]),
+        "genre_include": st.session_state.get("genre_include", DEFAULT_SETTINGS["genre_include"]),
+        "genre_exclude": st.session_state.get("genre_exclude", DEFAULT_SETTINGS["genre_exclude"]),
         "min_rating": st.session_state.get("min_rating", DEFAULT_SETTINGS["min_rating"]),
         "pad_start": st.session_state.get("pad_start", DEFAULT_SETTINGS["pad_start"]),
         "pad_end": st.session_state.get("pad_end", DEFAULT_SETTINGS["pad_end"]),
@@ -472,7 +473,7 @@ def manual_video_search(query, min_duration):
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError): pass
     return res
 
-def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params):
+def build_sql_filters(min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, params):
     sql = ""
     if specific_movie != "Все фильмы":
         sql += " AND m.title_ru = ?"
@@ -487,12 +488,24 @@ def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific
         sql += " AND (m.countries LIKE '%RU%' OR m.countries LIKE '%SU%')"
     elif country_filter == "Зарубежное":
         sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
-    if genre_filter != "Любой":
-        genre_en = GENRE_MAP.get(genre_filter, genre_filter)
-        sql += " AND m.genres LIKE ?"; params.append(f"%{genre_en}%")
+
+    if genre_include:
+        clauses = []
+        for g in genre_include:
+            genre_en = GENRE_MAP.get(g, g)
+            clauses.append("m.genres LIKE ?")
+            params.append(f"%{genre_en}%")
+        sql += " AND (" + " OR ".join(clauses) + ")"
+
+    if genre_exclude:
+        for g in genre_exclude:
+            genre_en = GENRE_MAP.get(g, g)
+            sql += " AND m.genres NOT LIKE ?"
+            params.append(f"%{genre_en}%")
+
     return sql
 
-def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match):
+def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, exact_match):
     if not os.path.exists(DB_NAME): return []
     try:
         conn = get_db()
@@ -542,7 +555,7 @@ def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, g
         search_query = " AND ".join(search_terms)
         
     params = [search_query]
-    sql_filters = build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific_movie, params)
+    sql_filters = build_sql_filters(min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, params)
 
     sql = f"""
         WITH ranked AS (
@@ -593,7 +606,7 @@ class StreamlitAIWidget:
     def error(self, msg): 
         self.status.error(msg)
 
-def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, st_status_box):
+def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, st_status_box):
     ai_logger = StreamlitAIWidget(st_status_box)
     
     st_status_box.update(label="🧠 ИИ придумывает поисковые теги...", state="running")
@@ -604,7 +617,7 @@ def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_f
     if not queries:
         ai_logger.warning("ИИ не смог придумать фразы. Запускаем слепой текстовый поиск...")
         st_status_box.update(label="⚠️ ИИ не справился. Обычный поиск.", state="error")
-        return _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, False)
+        return _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, False)
 
     ai_logger.success(f"ИИ предлагает искать по фразам: {', '.join(queries)}")
 
@@ -614,7 +627,7 @@ def _search_ai_pipeline(query_text, limit, offset, min_rating, t_type, country_f
     raw_results = []
     seen_ids = set()
     for q in queries:
-        res = _search_fts(q, limit=15, offset=0, min_rating=min_rating, t_type=t_type, country_filter=country_filter, genre_filter=genre_filter, specific_movie=specific_movie, exact_match=True)
+        res = _search_fts(q, limit=15, offset=0, min_rating=min_rating, t_type=t_type, country_filter=country_filter, genre_include=genre_include, genre_exclude=genre_exclude, specific_movie=specific_movie, exact_match=True)
         for r in res:
             uid = f"{r[0].imdb_id}_{r[0].sub_id}"
             if uid not in seen_ids:
@@ -726,7 +739,9 @@ with st.sidebar:
 
         st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change, disabled=filters_disabled)
         st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change, disabled=filters_disabled)
-        st.selectbox("🎭 Жанр:", list(GENRE_MAP.keys()), key="genre_filter", on_change=on_settings_change, disabled=filters_disabled)
+        genre_options = [k for k in GENRE_MAP if k != "Любой"]
+        st.multiselect("🎯 Искать в жанрах", options=genre_options, key="genre_include", on_change=on_settings_change, disabled=filters_disabled, placeholder="Все жанры")
+        st.multiselect("🚫 Исключить жанры", options=genre_options, key="genre_exclude", on_change=on_settings_change, disabled=filters_disabled, placeholder="Не исключать")
         st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change, disabled=filters_disabled)
 
     # ── Timing & source collapsible ──
@@ -1133,14 +1148,14 @@ with tab_search:
                 st.session_state.search_results = _search_ai_pipeline(
                     st.session_state.last_query, 
                     RESULTS_PER_PAGE, 0, st.session_state.min_rating, st.session_state.t_type, 
-                    st.session_state.c_filter, st.session_state.genre_filter, st.session_state.specific_movie, status_box
+                    st.session_state.c_filter, st.session_state.genre_include, st.session_state.genre_exclude, st.session_state.specific_movie, status_box
                 )
         else:
             with st.spinner("⚡ Выполняем точный поиск по базе..."):
                 st.session_state.search_results = _search_fts(
                     st.session_state.last_query, 
                     RESULTS_PER_PAGE, 0, st.session_state.min_rating, st.session_state.t_type,
-                    st.session_state.c_filter, st.session_state.genre_filter, st.session_state.specific_movie, st.session_state.exact_match_checkbox
+                    st.session_state.c_filter, st.session_state.genre_include, st.session_state.genre_exclude, st.session_state.specific_movie, st.session_state.exact_match_checkbox
                 )
         
         if not st.session_state.search_results:
@@ -1162,14 +1177,14 @@ with tab_search:
                         more_results = _search_ai_pipeline(
                             st.session_state.last_query, RESULTS_PER_PAGE, st.session_state.search_offset,
                             st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter, 
-                            st.session_state.genre_filter, st.session_state.specific_movie, status_box
+                            st.session_state.genre_include, st.session_state.genre_exclude, st.session_state.specific_movie, status_box
                         )
                 else:
                     with st.spinner("📎 Подгружаем..."):
                         more_results = _search_fts(
                             st.session_state.last_query, RESULTS_PER_PAGE, st.session_state.search_offset,
                             st.session_state.min_rating, st.session_state.t_type, st.session_state.c_filter, 
-                            st.session_state.genre_filter, st.session_state.specific_movie, st.session_state.exact_match_checkbox
+                            st.session_state.genre_include, st.session_state.genre_exclude, st.session_state.specific_movie, st.session_state.exact_match_checkbox
                         )
                 
                 if more_results:
