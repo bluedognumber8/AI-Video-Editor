@@ -238,6 +238,11 @@ def init_db():
         # --- NEW DB SCHEMA FOR SOURCES & OFFSETS ---
         conn.execute("CREATE TABLE IF NOT EXISTS movie_bindings (imdb_id TEXT PRIMARY KEY, source_id TEXT)")
         conn.execute("CREATE TABLE IF NOT EXISTS source_offsets (source_id TEXT PRIMARY KEY, offset_sec REAL)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS video_notes (
+            filename TEXT PRIMARY KEY, note TEXT DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )""")
         
         # Auto-migrate old data if exists
         cur = conn.cursor()
@@ -1165,7 +1170,7 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
-tab_search, tab_favs, tab_history, tab_ai, tab_url_dl, tab_title_dl = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке", "🔎 Скачать по названию"])
+tab_search, tab_favs, tab_history, tab_ai, tab_url_dl, tab_title_dl, tab_vault = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке", "🔎 Скачать по названию", "💾 Мои видео"])
 
 with tab_search:
     if st.session_state.trigger_search:
@@ -1671,6 +1676,80 @@ with tab_title_dl:
                     "status": "running",
                 }
                 st.toast("📥 Поиск и загрузка начаты! Смотрите в верхнюю панель.")
+
+
+# ── Вкладка: Мои видео (хранилище скачанных) ──
+with tab_vault:
+    st.markdown("### 💾 Мои видео")
+    st.caption("Все скачанные видеофайлы с возможностью добавлять заметки.")
+
+    def _load_all_notes():
+        with get_db() as conn:
+            rows = conn.execute("SELECT filename, note FROM video_notes").fetchall()
+            return {r["filename"]: r["note"] for r in rows}
+
+    all_notes = _load_all_notes()
+
+    mp4_files = sorted(
+        [f for f in os.listdir(CLIPS_DIR) if f.endswith(".mp4") and not f.endswith(".part")],
+        key=lambda f: os.path.getmtime(os.path.join(CLIPS_DIR, f)), reverse=True
+    )
+
+    if not mp4_files:
+        st.info("📂 В папке `clips/` пока нет скачанных видео.")
+    else:
+        st.markdown(f"**Всего видео: {len(mp4_files)}**")
+
+        for fname in mp4_files:
+            fpath = os.path.join(CLIPS_DIR, fname)
+            size_mb = os.path.getsize(fpath) / (1024 * 1024)
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath)).strftime("%d.%m.%Y %H:%M")
+
+            with st.container():
+                c_info, c_note = st.columns([2, 3])
+                with c_info:
+                    st.markdown(f"**{fname}**")
+                    st.caption(f"{size_mb:.1f} MB · {mtime}")
+
+                    if st.button("📂 Открыть папку", key=f"vault_open_{fname}"):
+                        abs_path = os.path.abspath(CLIPS_DIR)
+                        if sys.platform == "win32":
+                            os.startfile(abs_path)
+                        elif sys.platform == "darwin":
+                            subprocess.Popen(["open", abs_path])
+                        else:
+                            subprocess.Popen(["xdg-open", abs_path])
+
+                with c_note:
+                    current_note = all_notes.get(fname, "")
+                    note_key = f"vault_note_{fname}"
+                    new_note = st.text_area(
+                        "📝 Заметка",
+                        value=current_note,
+                        key=note_key,
+                        placeholder="Добавьте заметку к видео...",
+                        label_visibility="collapsed",
+                        height=80,
+                    )
+                    if new_note != current_note:
+                        with get_db() as conn:
+                            conn.execute(
+                                "INSERT INTO video_notes (filename, note, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
+                                "ON CONFLICT(filename) DO UPDATE SET note=excluded.note, updated_at=CURRENT_TIMESTAMP",
+                                (fname, new_note)
+                            )
+                        all_notes[fname] = new_note
+
+                col1, col2, col3 = st.columns([2, 3, 1])
+                with col3:
+                    if st.button("🗑️ Удалить", key=f"vault_del_{fname}"):
+                        try:
+                            os.remove(fpath)
+                            st.rerun()
+                        except OSError as e:
+                            st.error(f"Ошибка удаления: {e}")
+
+            st.markdown("---")
 
 
 # Download status updates handled by auto_updating_fragment (run_every=2s)
