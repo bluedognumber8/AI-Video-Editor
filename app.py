@@ -995,6 +995,66 @@ def render_download_manager():
                 except (OSError, FileNotFoundError, RuntimeError):
                     st.error("Файл не найден")
 
+                # ── Сменить источник для скачанного (если мусор) ──
+                if task.get('title_raw'):
+                    with st.expander("🔎 Качается мусор? (Сменить источник)"):
+                        dl_search_q = (f"{task['title_raw']} {task.get('year', '')}"
+                                       if task.get('m_type') != 'tv'
+                                       else f"{task['title_raw']} S{safe_int(task.get('season', 0)):02d}E{safe_int(task.get('ep', 0)):02d}")
+                        dl_src_pref = task.get("source_pref", "all")
+                        dl_results_key = f"dl_src_results_{task_id}"
+                        dl_sel_key = f"dl_src_sel_{task_id}"
+                        saved_dl_results = st.session_state.get(dl_results_key, [])
+
+                        if not saved_dl_results:
+                            if st.button("🔍 Найти другие источники", key=f"dl_find_{task_id}",
+                                         use_container_width=True):
+                                with st.spinner("🔎 Ищем видео..."):
+                                    found = search_watch_video(dl_search_q, int(task.get('orig_start_sec', 0) or 0) + 30,
+                                                              source_pref=dl_src_pref)
+                                if found:
+                                    st.session_state[dl_results_key] = found
+                                    st.session_state[dl_sel_key] = 0
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Другие источники не найдены")
+                        else:
+                            labels = [r["label"] for r in saved_dl_results]
+                            sel_idx = st.session_state.get(dl_sel_key, 0)
+                            if sel_idx >= len(labels):
+                                sel_idx = 0
+                            chosen_label = st.selectbox("Выберите другой источник:", labels,
+                                                        index=sel_idx,
+                                                        key=f"dl_sbox_{task_id}")
+                            chosen_idx = labels.index(chosen_label)
+                            st.session_state[dl_sel_key] = chosen_idx
+                            chosen = saved_dl_results[chosen_idx]
+
+                            dur = max(int((task.get('orig_end_sec', 0) or 0) - (task.get('orig_start_sec', 0) or 0)), 1)
+                            if st.button(f"⬇️ Скачать с этим источником", key=f"dl_reload_{task_id}",
+                                         type="primary", use_container_width=True):
+                                new_cmd = [
+                                    sys.executable, "-u", "magnet_get.py",
+                                    "--title", str(task.get('title_raw', '')),
+                                    "--orig_title", str(task.get('orig_title', '')),
+                                    "--year", str(task.get('year', 0)),
+                                    "--type", str(task.get('m_type', 'movie')),
+                                    "--season", str(task.get('season', 0)),
+                                    "--episode", str(task.get('ep', 0)),
+                                    "--start", seconds_to_hms(int(task.get('orig_start_sec', 0))),
+                                    "--duration", str(dur),
+                                    "--source", dl_src_pref,
+                                    "--force-source", f"{chosen['source']}:{chosen['id']}",
+                                    "--output", task['file_path'].replace('.mp4', '_alt.mp4'),
+                                ]
+                                log_file_handle = open(task['log_file'].replace('.txt', '_alt.txt'), "w", encoding="utf-8")
+                                _active_handles.append(log_file_handle)
+                                new_proc = subprocess.Popen(new_cmd, stdout=log_file_handle, stderr=subprocess.STDOUT,
+                                                            text=True, env=os.environ.copy())
+                                _active_processes.append(new_proc)
+                                st.toast("📥 Перезагрузка с новым источником!")
+                                st.rerun()
+
             elif task['status'] == 'stopped':
                 st.warning("⏹️ Загрузка остановлена пользователем.")
                 if st.button("Убрать ✖", key=f"clr_{task_id}", use_container_width=True):
