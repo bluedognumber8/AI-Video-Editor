@@ -862,70 +862,71 @@ def render_download_manager():
                     st.session_state.active_downloads.pop(task_id, None)
                     st.rerun()
 
-            with st.expander("📜 Транскрипция (±15 мин) и Корректировка Рассинхрона"):
-                q_filter = st.text_input(
-                    "🔍 Локальный поиск (Ctrl+F):", key=f"dl_search_{task_id}",
-                    placeholder="Начните вводить текст, чтобы отфильтровать список..."
-                )
-                subs = get_wide_context(task['imdb_id'], task['orig_start_sec'], task.get('sub_id'), window_sec=900)
+            if task.get('imdb_id') and task.get('orig_start_sec') is not None:
+                with st.expander("📜 Транскрипция (±15 мин) и Корректировка Рассинхрона"):
+                    q_filter = st.text_input(
+                        "🔍 Локальный поиск (Ctrl+F):", key=f"dl_search_{task_id}",
+                        placeholder="Начните вводить текст, чтобы отфильтровать список..."
+                    )
+                    subs = get_wide_context(task['imdb_id'], task['orig_start_sec'], task.get('sub_id'), window_sec=900)
 
-                if q_filter:
-                    subs = [s for s in subs if q_filter.lower() in s['text'].lower()]
+                    if q_filter:
+                        subs = [s for s in subs if q_filter.lower() in s['text'].lower()]
 
-                with st.container(height=250):
-                    for s in subs:
-                        is_target = (s['id'] == task.get('sub_id')) if task.get('sub_id') else (abs(s['sec'] - task['orig_start_sec']) < 2)
-                        prefix = "🎯 " if is_target else "⏱ "
-                        
-                        if st.button(
-                            f"{prefix}[{s['time_str']}] {s['text']}",
-                            key=f"fix_dl_{task_id}_{s['id']}",
-                            use_container_width=True,
-                            type="primary" if is_target else "tertiary" 
-                        ):
-                            new_offset = task['orig_start_sec'] - s['sec']
-                            set_source_offset(task['imdb_id'], task.get('saved_source'), new_offset)
+                    with st.container(height=250):
+                        for s in subs:
+                            is_target = (s['id'] == task.get('sub_id')) if task.get('sub_id') else (abs(s['sec'] - task['orig_start_sec']) < 2)
+                            prefix = "🎯 " if is_target else "⏱ "
                             
-                            for k in list(st.session_state.keys()):
-                                if k.startswith(f"offset_search_{task['imdb_id']}_{task['sub_id']}") or k.startswith(f"offset_fav_{task['imdb_id']}_{task['sub_id']}"):
-                                    st.session_state[k] = float(new_offset)
+                            if st.button(
+                                f"{prefix}[{s['time_str']}] {s['text']}",
+                                key=f"fix_dl_{task_id}_{s['id']}",
+                                use_container_width=True,
+                                type="primary" if is_target else "tertiary" 
+                            ):
+                                new_offset = task['orig_start_sec'] - s['sec']
+                                set_source_offset(task['imdb_id'], task.get('saved_source'), new_offset)
+                                
+                                for k in list(st.session_state.keys()):
+                                    if k.startswith(f"offset_search_{task['imdb_id']}_{task['sub_id']}") or k.startswith(f"offset_fav_{task['imdb_id']}_{task['sub_id']}"):
+                                        st.session_state[k] = float(new_offset)
 
-                            if task['status'] == 'running' and task.get('process') and task['process'].poll() is None:
-                                task['process'].terminate()
+                                if task['status'] == 'running' and task.get('process') and task['process'].poll() is None:
+                                    task['process'].terminate()
 
-                            SAFETY_BUFFER = 10.0
-                            start_sec = max(0, task['orig_start_sec'] - task['pad_start'] - SAFETY_BUFFER + new_offset)
-                            duration = max(1, (task['orig_end_sec'] + task['pad_end'] + new_offset) - start_sec)
+                                SAFETY_BUFFER = 10.0
+                                start_sec = max(0, task['orig_start_sec'] - task['pad_start'] - SAFETY_BUFFER + new_offset)
+                                duration = max(1, (task['orig_end_sec'] + task['pad_end'] + new_offset) - start_sec)
 
-                            cmd = [
-                                sys.executable, "-u", "magnet_get.py",
-                                "--title", str(task['title_raw']),
-                                "--orig_title", str(task.get('orig_title') or ""),
-                                "--year", str(safe_int(task['year'])),
-                                "--type", str(task['m_type']),
-                                "--season", str(safe_int(task['season'])),
-                                "--episode", str(safe_int(task['ep'])),
-                                "--start", seconds_to_hms(start_sec),
-                                "--duration", str(int(duration)),
-                                "--source", task['source_pref'],
-                                "--output", task['file_path']
-                            ]
-                            if task.get('saved_source'):
-                                cmd.extend(["--force_source", task['saved_source']])
+                                cmd = [
+                                    sys.executable, "-u", "magnet_get.py",
+                                    "--title", str(task['title_raw']),
+                                    "--orig_title", str(task.get('orig_title') or ""),
+                                    "--year", str(safe_int(task['year'])),
+                                    "--type", str(task['m_type']),
+                                    "--season", str(safe_int(task['season'])),
+                                    "--episode", str(safe_int(task['ep'])),
+                                    "--start", seconds_to_hms(start_sec),
+                                    "--duration", str(int(duration)),
+                                    "--source", task['source_pref'],
+                                    "--output", task['file_path']
+                                ]
+                                if task.get('saved_source'):
+                                    cmd.extend(["--force_source", task['saved_source']])
 
-                            log_handle = open(task['log_file'], "w", encoding="utf-8")
-                            _active_handles.append(log_handle)
-                            new_proc = subprocess.Popen(
-                                cmd, stdout=log_handle, stderr=subprocess.STDOUT,
-                                text=True, env=os.environ.copy()
-                            )
+                                log_handle = open(task['log_file'], "w", encoding="utf-8")
+                                _active_handles.append(log_handle)
+                                new_proc = subprocess.Popen(
+                                    cmd, stdout=log_handle, stderr=subprocess.STDOUT,
+                                    text=True, env=os.environ.copy()
+                                )
 
-                            task['process'] = new_proc
-                            task['_log_handle'] = log_handle
-                            task['status'] = 'running'
-                            st.success(f"✅ Смещение обновлено ({new_offset:.1f} сек). Запущен рестарт!")
-                            time.sleep(1)
-                            st.rerun()
+                                task['process'] = new_proc
+                                task['_log_handle'] = log_handle
+                                task['status'] = 'running'
+                                st.success(f"✅ Смещение обновлено ({new_offset:.1f} сек). Запущен рестарт!")
+                                time.sleep(1)
+                                st.rerun()
 
 render_download_manager()
 
@@ -1091,7 +1092,7 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
-tab_search, tab_favs, tab_history, tab_ai = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов"])
+tab_search, tab_favs, tab_history, tab_ai, tab_url_dl = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке"])
 
 with tab_search:
     if st.session_state.trigger_search:
@@ -1243,6 +1244,143 @@ with tab_ai:
                 ai_agent.save_prompts(prompt_data)
                 st.toast(f"✅ Промпт '{new_prompt_name}' сохранен и активирован!")
                 st.rerun()
+
+
+# ── Вкладка: Скачать по ссылке ──
+with tab_url_dl:
+    st.markdown("### 📥 Скачать фрагмент видео по ссылке")
+    st.caption("Вставьте ссылку на видео с YouTube, RuTube или VK Video. Скрипт скачает только нужный отрезок.")
+
+    url = st.text_input(
+        "🔗 Ссылка на видео",
+        placeholder="https://www.youtube.com/watch?v=... , https://rutube.ru/video/... , https://vk.com/video...",
+        key="url_dl_input"
+    )
+
+    # Авто-определение платформы
+    platform_icons = {"youtube": "▶️ YouTube", "rutube": "📺 RuTube", "vkvideo": "💬 VK Video", "url": "🌐 Другой"}
+    detected_platform = "url"
+    if url:
+        m = re.search(r'(youtube\.com|youtu\.be)', url, re.IGNORECASE)
+        if m: detected_platform = "youtube"
+        m = re.search(r'rutube\.ru', url, re.IGNORECASE)
+        if m: detected_platform = "rutube"
+        m = re.search(r'vk\.com/video|vkvideo\.ru', url, re.IGNORECASE)
+        if m: detected_platform = "vkvideo"
+
+    if url:
+        st.info(f"🎯 Определён источник: {platform_icons.get(detected_platform, '🌐 Другой')}")
+
+    quality = st.selectbox(
+        "🎬 Качество видео",
+        options=["best", "2160p", "1080p", "720p", "480p", "360p"],
+        index=0,
+        key="url_dl_quality",
+        help="best — максимальное доступное (может быть 4K/8K)"
+    )
+
+    def sec_to_hms(s):
+        s = int(s)
+        return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+
+    st.markdown("**⏱ Параметры обрезки**")
+    st.caption("Видео будет обрезано по началу и длительности. Начало отсчитывается от 00:00 видео.")
+
+    c_h, c_m, c_s, c_dur = st.columns([1.2, 1.2, 1.2, 4])
+    with c_h:
+        start_h = st.number_input("чч", min_value=0, max_value=23, value=0, label_visibility="collapsed", key="url_start_h")
+    with c_m:
+        start_m = st.number_input("мм", min_value=0, max_value=59, value=1, label_visibility="collapsed", key="url_start_m")
+    with c_s:
+        start_s = st.number_input("сс", min_value=0, max_value=59, value=0, label_visibility="collapsed", key="url_start_s")
+    with c_dur:
+        dur_sec = st.number_input("Длительность (сек)", min_value=1, max_value=86400, value=60, step=5, key="url_dur")
+
+    with st.expander("⚙️ Дополнительно"):
+        pad_before = st.number_input(
+            "Захватить раньше начала (сек)", min_value=0, max_value=300,
+            value=2, step=1, key="url_pad",
+            help="Добавит N секунд до указанного времени — пространство для монтажных склеек"
+        )
+        start_total = start_h*3600 + start_m*60 + start_s
+        st.caption("Фактический отрезок будет расширен на N секунд влево. "
+                   f"Итог: **`{sec_to_hms(max(0, start_total - pad_before))}`** → "
+                   f"**`{sec_to_hms(start_total + dur_sec)}`**")
+
+    start_sec_raw = start_h*3600 + start_m*60 + start_s
+    url_valid = bool(url and url.strip())
+    all_valid = url_valid and dur_sec > 0
+
+    if dur_sec > 0:
+        actual_start = max(0, start_sec_raw - pad_before)
+        actual_duration = dur_sec + (start_sec_raw - actual_start)
+        st.info(f"📐 Будет скачан отрезок: **{sec_to_hms(actual_start)}** — "
+                f"**{sec_to_hms(actual_start + actual_duration)}** "
+                f"(длительность {actual_duration} сек)")
+    else:
+        actual_start = 0
+        actual_duration = 0
+
+    if st.button("⬇️ Скачать отрезок", type="primary", use_container_width=True, key="url_dl_btn",
+                 disabled=not all_valid):
+        if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
+            st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
+        else:
+            task_id = f"urldl_{int(time.time())}"
+            sanitized_url = re.sub(r'[^a-zA-Z0-9]', '_', url.strip())[:30]
+            expected_file = os.path.join(CLIPS_DIR, f"url_{sanitized_url}_{task_id[-6:]}.mp4")
+            log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
+
+            cmd = [
+                sys.executable, "-u", "magnet_get.py",
+                "--url", url.strip(),
+                "--start", sec_to_hms(actual_start),
+                "--duration", str(actual_duration),
+                "--format", quality,
+                "--output", expected_file
+            ]
+
+            log_file_handle = open(log_file_path, "w", encoding="utf-8")
+            _active_handles.append(log_file_handle)
+            process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT,
+                                       text=True, env=os.environ.copy())
+            _active_processes.append(process)
+
+            clip_label = f"{sec_to_hms(actual_start)} — {sec_to_hms(actual_start + actual_duration)}"
+            st.session_state.active_downloads[task_id] = {
+                "title": f"URL: {url.strip()[:50]}",
+                "quote": clip_label,
+                "process": process,
+                "file_path": expected_file,
+                "log_file": log_file_path,
+                "_log_handle": log_file_handle,
+                "status": "running",
+            }
+            st.toast("📥 Загрузка по ссылке начата! Смотрите в верхнюю панель.")
+
+    # Кнопка открыть папку
+    if st.button("📂 Открыть папку со всеми клипами", use_container_width=False, key="url_open_folder"):
+        abs_path = os.path.abspath(CLIPS_DIR)
+        if sys.platform == "win32":
+            os.startfile(abs_path)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", abs_path])
+        else:
+            subprocess.Popen(["xdg-open", abs_path])
+
+    st.markdown("---")
+    # Показываем превью скачанных файлов по ссылкам
+    url_dl_files = sorted(
+        [f for f in os.listdir(CLIPS_DIR) if f.startswith("url_") and f.endswith(".mp4")],
+        key=lambda f: os.path.getmtime(os.path.join(CLIPS_DIR, f)), reverse=True
+    )[:5]
+    if url_dl_files:
+        st.markdown("---")
+        st.markdown("**📂 Последние скачанные по ссылке:**")
+        for f in url_dl_files:
+            fpath = os.path.join(CLIPS_DIR, f)
+            size_kb = os.path.getsize(fpath) / 1024
+            st.markdown(f"- `{f}` ({size_kb:.0f} KB)")
 
 
 # Download status updates handled by auto_updating_fragment (run_every=2s)

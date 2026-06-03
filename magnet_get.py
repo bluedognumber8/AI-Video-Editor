@@ -321,14 +321,26 @@ def evaluate_torrent(title, seeds, size_gb, is_tv):
 # 🎬 YOUTUBE / RUTUBE — СТРИМИНГОВЫЕ ИСТОЧНИКИ
 # =====================================================================
 
-def do_stream_download(video_url, start_time, duration_secs, output_path, platform_name):
+# Пресеты качества для yt-dlp
+QUALITY_PRESETS = {
+    "best":   "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    "2160p":  "bestvideo[height<=2160][ext=mp4]+bestaudio[ext=m4a]/best[height<=2160][ext=mp4]/best",
+    "1080p":  "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+    "720p":   "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+    "480p":   "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
+    "360p":   "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best",
+}
+
+def do_stream_download(video_url, start_time, duration_secs, output_path, platform_name, fmt="best"):
     end_time = seconds_to_time(time_to_seconds(start_time) + duration_secs)
-    logger.info(f"Скач��вание фрагмента с {platform_name.upper()}...")
-    
+    logger.info(f"Скачивание фрагмента с {platform_name.upper()}...")
+    fmt_str = QUALITY_PRESETS.get(fmt, QUALITY_PRESETS["best"])
+    logger.info(f"Качество: {fmt}")
+
     download_cmd = [
         "yt-dlp", "--quiet", "--progress",
         "--download-sections", f"*{start_time}-{end_time}",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "-f", fmt_str,
         "--force-keyframes-at-cuts", "-o", output_path, video_url
     ]
 
@@ -731,9 +743,19 @@ def try_torrent(query, start_time, duration_secs, output_path, target_season, ta
 # 🚀 MAIN
 # =====================================================================
 
+def detect_url_platform(url):
+    """Return a human-readable platform name from a video URL."""
+    if re.search(r'youtube\.com|youtu\.be', url, re.IGNORECASE):
+        return "youtube"
+    elif re.search(r'rutube\.ru', url, re.IGNORECASE):
+        return "rutube"
+    elif re.search(r'vk\.com/video|vkvideo\.ru', url, re.IGNORECASE):
+        return "vkvideo"
+    return "url"
+
 def main():
-    parser = argparse.ArgumentParser(description="Скачивание фрагментов видео из YouTube, RuTube и торрентов (через TorrServer)")
-    parser.add_argument("--title", required=True, help="Название фильма/сериала")
+    parser = argparse.ArgumentParser(description="Скачивание фрагментов видео из YouTube, RuTube, VK Video и торрентов (через TorrServer)")
+    parser.add_argument("--title", help="Название фильма/сериала (если не указан --url)")
     parser.add_argument("--orig_title", default="", help="Оригинальное название")
     parser.add_argument("--year", default="0", help="Год выпуска")
     parser.add_argument("--type", default="movie", choices=["movie", "tv"], help="Тип: movie или tv")
@@ -743,12 +765,37 @@ def main():
     parser.add_argument("--duration", required=True, type=int, help="Длительность (сек)")
     parser.add_argument("--source", default="all", choices=["all", "youtube", "rutube", "torrent"], help="Источник")
     parser.add_argument("--force_source", default="", help="Принудительный источник (type:id)")
+    parser.add_argument("--url", default="", help="Прямая ссылка на видео (YouTube/RuTube/VK). Включает режим скачивания по ссылке")
+    parser.add_argument("--format", default="best", choices=list(QUALITY_PRESETS.keys()), help="Качество видео (для --url)")
     parser.add_argument("--output", default="", help="Путь к выходному файлу")
     args = parser.parse_args()
 
     logger.info("=" * 60)
     logger.info("🎬 AI-Режиссер Монтажа — Загрузчик клипов (TorrServer Edition)")
     logger.info("=" * 60)
+
+    # ── Режим скачивания по прямой ссылке ──
+    if args.url:
+        platform = detect_url_platform(args.url)
+        logger.info(f"📥 Режим прямой ссылки. Платформа: {platform.upper()}")
+        logger.info(f"   URL: {args.url}")
+
+        output_file = args.output or os.path.join(
+            CONFIG["clip"]["output_folder"],
+            f"url_clip_{int(time.time())}.mp4"
+        )
+        ensure_dir(os.path.dirname(output_file) or CONFIG["clip"]["output_folder"])
+
+        if do_stream_download(args.url, args.start, args.duration, output_file, platform, fmt=args.format):
+            logger.info(f"✅ УСПЕХ! Клип сохранен: {output_file}")
+            sys.exit(0)
+        else:
+            logger.error("❌ Ошибка: не удалось скачать видео по ссылке")
+            sys.exit(1)
+
+    # ── Стандартный режим (поиск по названию) ──
+    if not args.title:
+        parser.error("Укажите --title (название) или --url (прямая ссылка)")
 
     is_tv = args.type == "tv"
     target_ep = int(args.episode) if is_tv else 0
