@@ -790,11 +790,12 @@ def render_download_manager():
                 else:
                     task['status'] = 'error'
 
-        badge_html = _status_badge(task['status'])
+        status_emoji = {"running": "⏳", "success": "✅", "error": "❌", "stopped": "⏹️"}.get(task['status'], "❌")
         quote_preview = f" — «{sanitize_html_text(task.get('quote', '')[:30])}...»" if task.get('quote') else ""
-        accordion_label = f"{task['title']}{quote_preview}  {badge_html}"
+        accordion_label = f"{status_emoji} {task['title']}{quote_preview}"
 
         with st.expander(accordion_label, expanded=(task['status'] == 'running')):
+            st.markdown(_status_badge(task['status']), unsafe_allow_html=True)
             
             if os.path.exists(task['log_file']):
                 try:
