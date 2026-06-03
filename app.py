@@ -199,6 +199,32 @@ st.markdown("""
                 transform: none !important;
             }
         }
+
+        /* ── Time input fields: compact layout ── */
+        .time-input-row div[data-testid="stColumn"] {
+            min-width: 0;
+        }
+        .time-input-row div[data-testid="stNumberInput"] {
+            max-width: 110px;
+        }
+        .time-input-row div[data-testid="stNumberInput"] input {
+            text-align: center;
+            font-size: 14px;
+        }
+        .time-input-row label p {
+            font-size: 13px !important;
+        }
+        .time-input-row .st-emotion-cache-1nq1r1b {
+            gap: 8px;
+        }
+        /* ── Duration input ── */
+        .time-input-row + div div[data-testid="stNumberInput"] {
+            max-width: 200px;
+        }
+        /* ── Selectbox in quality ── */
+        div[data-testid="stSelectbox"] label p {
+            font-size: 14px !important;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -1326,45 +1352,49 @@ with tab_url_dl:
         s = int(s)
         return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
 
-    st.markdown("**⏱ Параметры обрезки**")
-    st.caption("Видео будет обрезано по началу и длительности. Начало отсчитывается от 00:00 видео.")
+    with st.expander("⚙️ Дополнительно"):
+        url_full = st.checkbox("📦 Полное видео (без обрезки)", value=False, key="url_dl_full",
+                               help="Скачать видео целиком без вырезания фрагмента.")
+        if not url_full:
+            url_pad_before = st.number_input(
+                "Захватить раньше начала (сек)", min_value=0, max_value=300,
+                value=2, step=1, key="url_pad",
+                help="Добавит N секунд до указанного времени — пространство для монтажных склеек"
+            )
+        else:
+            url_pad_before = 0
 
-    c_h, c_m, c_s, c_dur = st.columns([1.2, 1.2, 1.2, 4])
-    with c_h:
-        start_h = st.number_input("чч", min_value=0, max_value=23, value=0, label_visibility="collapsed", key="url_start_h")
-    with c_m:
-        start_m = st.number_input("мм", min_value=0, max_value=59, value=1, label_visibility="collapsed", key="url_start_m")
-    with c_s:
-        start_s = st.number_input("сс", min_value=0, max_value=59, value=0, label_visibility="collapsed", key="url_start_s")
-    with c_dur:
+    if not url_full:
+        st.markdown("**⏱ Параметры обрезки**")
+        st.caption("Укажите начало и длительность фрагмента.")
+
+        c_h, c_m, c_s = st.columns(3)
+        with c_h:
+            start_h = st.number_input("Часы", min_value=0, max_value=23, value=0, key="url_start_h")
+        with c_m:
+            start_m = st.number_input("Минуты", min_value=0, max_value=59, value=1, key="url_start_m")
+        with c_s:
+            start_s = st.number_input("Секунды", min_value=0, max_value=59, value=0, key="url_start_s")
+
         dur_sec = st.number_input("Длительность (сек)", min_value=1, max_value=86400, value=60, step=5, key="url_dur")
 
-    with st.expander("⚙️ Дополнительно"):
-        pad_before = st.number_input(
-            "Захватить раньше начала (сек)", min_value=0, max_value=300,
-            value=2, step=1, key="url_pad",
-            help="Добавит N секунд до указанного времени — пространство для монтажных склеек"
-        )
-        start_total = start_h*3600 + start_m*60 + start_s
-        st.caption("Фактический отрезок будет расширен на N секунд влево. "
-                   f"Итог: **`{sec_to_hms(max(0, start_total - pad_before))}`** → "
-                   f"**`{sec_to_hms(start_total + dur_sec)}`**")
-
-    start_sec_raw = start_h*3600 + start_m*60 + start_s
-    url_valid = bool(url and url.strip())
-    all_valid = url_valid and dur_sec > 0
-
-    if dur_sec > 0:
-        actual_start = max(0, start_sec_raw - pad_before)
+        start_sec_raw = start_h*3600 + start_m*60 + start_s
+        actual_start = max(0, start_sec_raw - url_pad_before)
         actual_duration = dur_sec + (start_sec_raw - actual_start)
-        st.info(f"📐 Будет скачан отрезок: **{sec_to_hms(actual_start)}** — "
+        st.info(f"📐 Будет скачан отрезок: **{sec_to_hms(actual_start)}** → "
                 f"**{sec_to_hms(actual_start + actual_duration)}** "
-                f"(длительность {actual_duration} сек)")
+                f"(+{url_pad_before} сек запаса слева)")
     else:
+        start_h = 0; start_m = 0; start_s = 0
+        dur_sec = 0
+        start_sec_raw = 0
         actual_start = 0
         actual_duration = 0
 
-    if st.button("⬇️ Скачать отрезок", type="primary", use_container_width=True, key="url_dl_btn",
+    all_valid = bool(url and url.strip()) and (url_full or dur_sec > 0)
+    btn_label = "⬇️ Скачать видео" if url_full else "⬇️ Скачать отрезок"
+
+    if st.button(btn_label, type="primary", use_container_width=True, key="url_dl_btn",
                  disabled=not all_valid):
         if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
             st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
@@ -1377,11 +1407,14 @@ with tab_url_dl:
             cmd = [
                 sys.executable, "-u", "magnet_get.py",
                 "--url", url.strip(),
-                "--start", sec_to_hms(actual_start),
-                "--duration", str(actual_duration),
                 "--format", quality,
                 "--output", expected_file
             ]
+            if url_full:
+                cmd.append("--full")
+            else:
+                cmd.extend(["--start", sec_to_hms(actual_start),
+                            "--duration", str(actual_duration)])
 
             log_file_handle = open(log_file_path, "w", encoding="utf-8")
             _active_handles.append(log_file_handle)
@@ -1389,7 +1422,7 @@ with tab_url_dl:
                                        text=True, env=os.environ.copy())
             _active_processes.append(process)
 
-            clip_label = f"{sec_to_hms(actual_start)} — {sec_to_hms(actual_start + actual_duration)}"
+            clip_label = "Полное видео" if url_full else f"{sec_to_hms(actual_start)} — {sec_to_hms(actual_start + actual_duration)}"
             st.session_state.active_downloads[task_id] = {
                 "title": f"URL: {url.strip()[:50]}",
                 "quote": clip_label,
@@ -1457,97 +1490,183 @@ with tab_title_dl:
         help="best — максимальное доступное"
     )
 
-    title_full = st.checkbox("📦 Полное видео (без обрезки)", value=True, key="title_dl_full",
-                             help="Скачать целиком. Снимите галочку, чтобы вырезать фрагмент.")
-
-    if not title_full:
-        st.markdown("**⏱ Параметры обрезки**")
-        c_h, c_m, c_s, c_dur = st.columns([1.2, 1.2, 1.2, 4])
-        with c_h:
-            title_start_h = st.number_input("чч", min_value=0, max_value=23, value=0, label_visibility="collapsed", key="title_start_h")
-        with c_m:
-            title_start_m = st.number_input("мм", min_value=0, max_value=59, value=1, label_visibility="collapsed", key="title_start_m")
-        with c_s:
-            title_start_s = st.number_input("сс", min_value=0, max_value=59, value=0, label_visibility="collapsed", key="title_start_s")
-        with c_dur:
-            title_dur_sec = st.number_input("Длительность (сек)", min_value=1, max_value=86400, value=60, step=5, key="title_dur")
-
-        with st.expander("⚙️ Дополнительно"):
+    with st.expander("⚙️ Дополнительно", expanded=False):
+        title_full = st.checkbox("📦 Полное видео (без обрезки)", value=False, key="title_dl_full",
+                                 help="Скачать целиком. Отметьте, чтобы вырезать фрагмент (по умолчанию выключено).")
+        title_pick = st.checkbox("🔎 Выбрать видео из результатов поиска", value=False, key="title_dl_pick",
+                                 help="Показать список найденных видео и выбрать нужное перед скачиванием.")
+        if not title_full:
             title_pad = st.number_input(
                 "Захватить раньше начала (сек)", min_value=0, max_value=300,
                 value=2, step=1, key="title_pad",
                 help="Добавит N секунд до указанного времени — пространство для монтажных склеек"
             )
-            start_total = title_start_h*3600 + title_start_m*60 + title_start_s
-            st.caption("Фактический отрезок будет расширен на N секунд влево. "
-                       f"Итог: **`{sec_to_hms(max(0, start_total - title_pad))}`** → "
-                       f"**`{sec_to_hms(start_total + title_dur_sec)}`**")
+        else:
+            title_pad = 0
+
+    if not title_full:
+        st.markdown("**⏱ Параметры обрезки**")
+        st.caption("Укажите начало и длительность фрагмента.")
+
+        c_h, c_m, c_s = st.columns(3)
+        with c_h:
+            title_start_h = st.number_input("Часы", min_value=0, max_value=23, value=0, key="title_start_h")
+        with c_m:
+            title_start_m = st.number_input("Минуты", min_value=0, max_value=59, value=1, key="title_start_m")
+        with c_s:
+            title_start_s = st.number_input("Секунды", min_value=0, max_value=59, value=0, key="title_start_s")
+
+        title_dur_sec = st.number_input("Длительность (сек)", min_value=1, max_value=86400, value=60, step=5, key="title_dur")
+
+        raw_start = title_start_h*3600 + title_start_m*60 + title_start_s
+        actual_start = max(0, raw_start - title_pad)
+        actual_dur = title_dur_sec + (raw_start - actual_start)
+        st.info(f"📐 Будет скачан отрезок: **{sec_to_hms(actual_start)}** → "
+                f"**{sec_to_hms(actual_start + actual_dur)}** "
+                f"(+{title_pad} сек запаса слева)")
     else:
         title_start_h = 0; title_start_m = 0; title_start_s = 0
-        title_dur_sec = 0; title_pad = 0
+        title_dur_sec = 0
+        raw_start = 0
+        actual_start = 0
+        actual_dur = 0
 
-    # Кнопка открыть папку
-    if st.button("📂 Открыть папку со всеми клипами", use_container_width=False, key="title_open_folder"):
-        abs_path = os.path.abspath(CLIPS_DIR)
-        if sys.platform == "win32":
-            os.startfile(abs_path)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", abs_path])
-        else:
-            subprocess.Popen(["xdg-open", abs_path])
+    # ── Режим выбора из результатов ──
+    if title_pick and title_query and title_query.strip():
+        if st.button("🔍 Искать результаты", use_container_width=True, key="title_search_btn"):
+            with st.status("🔎 Поиск видео...", expanded=True) as search_status:
+                try:
+                    cmd = [
+                        sys.executable, "-u", "magnet_get.py",
+                        "--title", title_query.strip(),
+                        "--source", title_source,
+                        "--show-results"
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                    results = json.loads(res.stdout) if res.stdout.strip() else []
+                except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+                    results = []
+                    st.error(f"Ошибка поиска: {e}")
 
-    st.markdown("---")
-
-    can_download = bool(title_query and title_query.strip())
-    if st.button("🔍 Найти и скачать", type="primary", use_container_width=True, key="title_dl_btn",
-                 disabled=not can_download):
-        if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
-            st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
-        else:
-            task_id = f"titledl_{int(time.time())}"
-            sanitized_name = re.sub(r'[^a-zA-Z0-9а-яА-Я]', '_', title_query.strip())[:40]
-            expected_file = os.path.join(CLIPS_DIR, f"title_{sanitized_name}_{task_id[-6:]}.mp4")
-            log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
-
-            if title_full:
-                cmd = [
-                    sys.executable, "-u", "magnet_get.py",
-                    "--title", title_query.strip(),
-                    "--source", title_source,
-                    "--format", title_quality,
-                    "--full",
-                    "--output", expected_file
-                ]
+            if results:
+                search_status.update(label=f"🔎 Найдено {len(results)} видео", state="complete", expanded=False)
+                st.session_state["title_search_results"] = results
             else:
-                raw_start = title_start_h*3600 + title_start_m*60 + title_start_s
-                actual_start = max(0, raw_start - title_pad)
-                actual_dur = title_dur_sec + (raw_start - actual_start)
+                search_status.update(label="❌ Ничего не найдено", state="error", expanded=True)
+                st.session_state["title_search_results"] = []
+
+        # Показываем результаты, если есть
+        saved_results = st.session_state.get("title_search_results", [])
+        if saved_results:
+            st.markdown("**Результаты поиска:**")
+            options = []
+            for i, r in enumerate(saved_results):
+                src_icon = {"youtube": "▶️", "rutube": "📺", "torrent": "⚡"}.get(r.get("source", ""), "🔗")
+                dur_str = f", {r['duration']} сек" if r.get("duration") else ""
+                seeds_str = f", 👤 {r['seeds']} сидов" if r.get("seeds") is not None else ""
+                size_str = f", 💾 {r['size_gb']} GB" if r.get("size_gb") else ""
+                label = f"{src_icon} [{r.get('source', '?')}] {r.get('title', '?')}{dur_str}{seeds_str}{size_str}"
+                options.append(label)
+
+            selected_idx = st.selectbox("Выберите видео для скачивания", options=options, key="title_pick_select")
+
+            if st.button("⬇️ Скачать выбранное", type="primary", use_container_width=True, key="title_pick_dl_btn"):
+                sel = saved_results[options.index(selected_idx)]
+                force_source = f"{sel['source']}:{sel['id']}"
+
+                if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
+                    st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
+                else:
+                    task_id = f"titledl_{int(time.time())}"
+                    sanitized_name = re.sub(r'[^a-zA-Z0-9а-яА-Я]', '_', title_query.strip())[:40]
+                    expected_file = os.path.join(CLIPS_DIR, f"title_{sanitized_name}_{task_id[-6:]}.mp4")
+                    log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
+
+                    cmd = [
+                        sys.executable, "-u", "magnet_get.py",
+                        "--title", title_query.strip(),
+                        "--source", title_source,
+                        "--format", title_quality,
+                        "--force-source", force_source,
+                        "--output", expected_file
+                    ]
+                    if title_full:
+                        cmd.append("--full")
+                    else:
+                        cmd.extend(["--start", sec_to_hms(actual_start),
+                                    "--duration", str(actual_dur)])
+
+                    log_file_handle = open(log_file_path, "w", encoding="utf-8")
+                    _active_handles.append(log_file_handle)
+                    process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT,
+                                               text=True, env=os.environ.copy())
+                    _active_processes.append(process)
+
+                    st.session_state.active_downloads[task_id] = {
+                        "title": f"🔎 {title_query.strip()[:50]}",
+                        "quote": sel['title'][:60],
+                        "process": process,
+                        "file_path": expected_file,
+                        "log_file": log_file_path,
+                        "_log_handle": log_file_handle,
+                        "status": "running",
+                    }
+                    st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
+
+    # ── Обычный режим (без выбора) ──
+    elif not title_pick:
+        # Кнопка открыть папку
+        if st.button("📂 Открыть папку со всеми клипами", use_container_width=False, key="title_open_folder"):
+            abs_path = os.path.abspath(CLIPS_DIR)
+            if sys.platform == "win32":
+                os.startfile(abs_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", abs_path])
+            else:
+                subprocess.Popen(["xdg-open", abs_path])
+
+        st.markdown("---")
+
+        can_download = bool(title_query and title_query.strip())
+        if st.button("🔍 Найти и скачать", type="primary", use_container_width=True, key="title_dl_btn",
+                     disabled=not can_download):
+            if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
+                st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
+            else:
+                task_id = f"titledl_{int(time.time())}"
+                sanitized_name = re.sub(r'[^a-zA-Z0-9а-яА-Я]', '_', title_query.strip())[:40]
+                expected_file = os.path.join(CLIPS_DIR, f"title_{sanitized_name}_{task_id[-6:]}.mp4")
+                log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
+
                 cmd = [
                     sys.executable, "-u", "magnet_get.py",
                     "--title", title_query.strip(),
                     "--source", title_source,
                     "--format", title_quality,
-                    "--start", sec_to_hms(actual_start),
-                    "--duration", str(actual_dur),
                     "--output", expected_file
                 ]
+                if title_full:
+                    cmd.append("--full")
+                else:
+                    cmd.extend(["--start", sec_to_hms(actual_start),
+                                "--duration", str(actual_dur)])
 
-            log_file_handle = open(log_file_path, "w", encoding="utf-8")
-            _active_handles.append(log_file_handle)
-            process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT,
-                                       text=True, env=os.environ.copy())
-            _active_processes.append(process)
+                log_file_handle = open(log_file_path, "w", encoding="utf-8")
+                _active_handles.append(log_file_handle)
+                process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT,
+                                           text=True, env=os.environ.copy())
+                _active_processes.append(process)
 
-            st.session_state.active_downloads[task_id] = {
-                "title": f"🔎 {title_query.strip()[:50]}",
-                "quote": f"Источник: {title_source}",
-                "process": process,
-                "file_path": expected_file,
-                "log_file": log_file_path,
-                "_log_handle": log_file_handle,
-                "status": "running",
-            }
-            st.toast("📥 Поиск и загрузка начаты! Смотрите в верхнюю панель.")
+                st.session_state.active_downloads[task_id] = {
+                    "title": f"🔎 {title_query.strip()[:50]}",
+                    "quote": f"Источник: {title_source}",
+                    "process": process,
+                    "file_path": expected_file,
+                    "log_file": log_file_path,
+                    "_log_handle": log_file_handle,
+                    "status": "running",
+                }
+                st.toast("📥 Поиск и загрузка начаты! Смотрите в верхнюю панель.")
 
 
 # Download status updates handled by auto_updating_fragment (run_every=2s)

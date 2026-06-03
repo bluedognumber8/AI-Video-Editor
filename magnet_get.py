@@ -24,7 +24,7 @@ import signal
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
     logger.addHandler(handler)
 
@@ -761,6 +761,98 @@ def detect_url_platform(url):
         return "vkvideo"
     return "url"
 
+def search_all_sources(title, orig_title, year, m_type, season, episode, source):
+    """
+    Search-only mode: iterate all sources, collect results as a list of dicts.
+    Returns list of {source, id, title, duration, seeds?, size_gb?}
+    """
+    results = []
+    sources_list = [source] if source != "all" else ["youtube", "rutube", "torrent"]
+    queries = generate_search_queries(title, orig_title, year, m_type, season, episode)
+
+    session = None
+    active_domain = None
+
+    for src in sources_list:
+        for query in queries:
+            if src == "youtube":
+                try:
+                    res = subprocess.run(
+                        ["yt-dlp", f"ytsearch5:{query}", "--dump-json", "--no-warnings"],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    for line in res.stdout.strip().split("\n"):
+                        if not line.strip():
+                            continue
+                        try:
+                            v = json.loads(line)
+                            results.append({
+                                "source": "youtube",
+                                "id": v.get("id", ""),
+                                "title": v.get("title", ""),
+                                "duration": v.get("duration", 0),
+                                "url": f"https://www.youtube.com/watch?v={v.get('id', '')}",
+                            })
+                        except json.JSONDecodeError:
+                            continue
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+
+            elif src == "rutube":
+                try:
+                    search_url = f"https://rutube.ru/api/search/video/?query={urllib.parse.quote(query)}"
+                    resp = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+                    for v in resp.json().get("results", []):
+                        video_url = v.get("video_url", "")
+                        if not video_url.startswith("http"):
+                            video_url = "https://rutube.ru" + video_url
+                        results.append({
+                            "source": "rutube",
+                            "id": video_url,
+                            "title": v.get("title", ""),
+                            "duration": v.get("duration", 0),
+                        })
+                except (requests.RequestException, json.JSONDecodeError):
+                    pass
+
+            elif src == "torrent":
+                if session is None:
+                    session, active_domain = ensure_rutracker_session()
+                    if not session:
+                        continue
+                try:
+                    search_url = f"https://{active_domain}/forum/tracker.php?nm={urllib.parse.quote(query.encode('windows-1251'))}&o=10&s=2"
+                    resp = session.get(search_url, timeout=15)
+                    soup = BeautifulSoup(resp.content.decode("windows-1251", errors="ignore"), "html.parser")
+                    for row in soup.select("tr.hl-tr"):
+                        title_tag = row.select_one("a.tLink")
+                        if not title_tag:
+                            continue
+                        try:
+                            tid = title_tag["href"].split("t=")[1].split("&")[0]
+                        except (IndexError, KeyError, ValueError):
+                            continue
+                        try:
+                            seeds = int(row.select_one(".seedmed").text.strip())
+                        except (AttributeError, ValueError, TypeError):
+                            seeds = 0
+                        try:
+                            size_gb = int(row.select_one(".tor-size")["data-ts_text"]) / (1024 ** 3)
+                        except (AttributeError, ValueError, TypeError, KeyError):
+                            size_gb = 0
+                        results.append({
+                            "source": "torrent",
+                            "id": tid,
+                            "title": title_tag.text.strip(),
+                            "seeds": seeds,
+                            "size_gb": round(size_gb, 1),
+                        })
+                except (requests.RequestException, AttributeError):
+                    pass
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="Скачивание фрагментов видео из YouTube, RuTube, VK Video и торрентов (через TorrServer)")
     parser.add_argument("--title", help="Название фильма/сериала (если не указан --url)")
@@ -777,6 +869,7 @@ def main():
     parser.add_argument("--format", default="best", choices=list(QUALITY_PRESETS.keys()), help="Качество видео")
     parser.add_argument("--full", action="store_true", help="Скачать полное видео (без обрезки)")
     parser.add_argument("--output", default="", help="Путь к выходному файлу")
+    parser.add_argument("--show-results", action="store_true", help="Показать результаты поиска в JSON и выйти (без скачивания)")
     args = parser.parse_args()
 
     logger.info("=" * 60)
@@ -806,6 +899,15 @@ def main():
     # ── Стандартный режим (поиск по названию) ──
     if not args.title:
         parser.error("Укажите --title (название) или --url (прямая ссылка)")
+
+    # ── Режим показа результатов (без скачивания) ──
+    if args.show_results:
+        results = search_all_sources(
+            args.title, args.orig_title, args.year, args.type,
+            args.season, args.episode, args.source
+        )
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        sys.exit(0)
 
     is_tv = args.type == "tv"
     target_ep = int(args.episode) if is_tv else 0
