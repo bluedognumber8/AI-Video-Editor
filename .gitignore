@@ -14,6 +14,7 @@ user_settings.json
 last_ai_model.json
 rutracker_cookies.*
 settings.json
+ui_settings.json
 
 # Raw Data and Dev Archives
 dev_archive/
