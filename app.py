@@ -31,6 +31,8 @@ import logging
 import html as html_module
 from collections import namedtuple
 import atexit
+import urllib.parse
+import requests
 
 from ai_agent import generate_search_queries, rank_database_results
 
@@ -503,6 +505,54 @@ def manual_video_search(query, min_duration):
                 except (json.JSONDecodeError, KeyError): pass
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError): pass
     return res
+
+
+def search_watch_video(query, min_duration):
+    """Find a video URL on YouTube or RuTube (whichever has a match first). Returns {source, id, label} or None."""
+    # YouTube via yt-dlp
+    try:
+        sub = subprocess.run(
+            ["yt-dlp", f"ytsearch5:{query}", "--dump-json", "--no-warnings"],
+            capture_output=True, text=True, timeout=15
+        )
+        for line in sub.stdout.strip().split("\n"):
+            if line.strip():
+                try:
+                    v = json.loads(line)
+                    if v.get("duration", 0) >= min_duration:
+                        return {"source": "youtube", "id": v.get("id"), "label": v.get("title")}
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    # RuTube via API
+    try:
+        encoded = urllib.parse.quote(query)
+        resp = requests.get(
+            f"https://rutube.ru/api/search/video/?query={encoded}",
+            headers={"User-Agent": "Mozilla/5.0"}, timeout=10
+        )
+        for v in resp.json().get("results", []):
+            dur = v.get("duration", 0)
+            if isinstance(dur, str) and ":" in dur:
+                parts = list(map(int, dur.split(":")))
+                dur = parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else parts[0] * 60 + parts[1]
+            else:
+                try:
+                    dur = int(dur)
+                except (ValueError, TypeError):
+                    dur = 0
+            if dur >= min_duration:
+                video_url = v.get("video_url", "")
+                if video_url and not video_url.startswith("http"):
+                    video_url = "https://rutube.ru" + video_url
+                if video_url:
+                    return {"source": "rutube", "id": video_url, "label": v.get("title")}
+    except (requests.RequestException, json.JSONDecodeError, OSError):
+        pass
+
+    return None
 
 def build_sql_filters(min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, params):
     sql = ""
@@ -1170,10 +1220,12 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
-            # ── Смотреть видео в браузере (с таймкодом если есть привязанный источник) ──
+            # ── Смотреть видео: прямой линк с таймкодом или поиск на лету ──
             start_sec_for_link = int(srt_to_seconds(start_srt))
-            src_pref = st.session_state.get("source_pref", "all")
+            watch_cache_key = f"watch_vid_{list_type}_{uid}"
 
+            # 1) Привязанный источник → прямой линк
+            vid_url = None
             if saved_source and ":" in str(saved_source):
                 s_type, s_id = str(saved_source).split(":", 1)
                 if s_type == "youtube" and s_id:
@@ -1183,30 +1235,44 @@ def render_result_card(row, uid, list_type="search"):
                     base_url = s_id.rstrip("/")
                     vid_url = f"{base_url}/?t={start_sec_for_link}&r=plwd"
                     btn_label = "📺 Смотреть на RuTube"
-                else:
-                    vid_url = None
-            else:
-                vid_url = None
 
-            if not vid_url:
-                vid_search_q = f"{title} {year}" if m_type != "tv" else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}"
-                if src_pref == "youtube":
-                    vid_url = f"https://www.youtube.com/results?search_query={vid_search_q.replace(' ', '+')}+фильм"
+            # 2) Найдено ранее (кэш поиска) → прямой линк
+            if not vid_url and watch_cache_key in st.session_state:
+                cached = st.session_state[watch_cache_key]
+                if cached["source"] == "youtube":
+                    vid_url = f"https://www.youtube.com/watch?v={cached['id']}&t={start_sec_for_link}s"
                     btn_label = "▶️ Смотреть на YouTube"
-                else:
-                    vid_url = f"https://rutube.ru/search/video/?query={vid_search_q.replace(' ', '+')}+фильм"
+                elif cached["source"] == "rutube":
+                    base_url = cached["id"].rstrip("/")
+                    vid_url = f"{base_url}/?t={start_sec_for_link}&r=plwd"
                     btn_label = "📺 Смотреть на RuTube"
 
-            st.markdown(
-                f'<a href="{vid_url}" target="_blank" style="display:block; text-align:center; '
-                f'padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.06); '
-                f'color:#ccc; text-decoration:none; font-size:14px; margin-top:6px; border:1px solid rgba(255,255,255,0.1); '
-                f'transition:all 0.15s;" '
-                f'onmouseover="this.style.background=\'rgba(255,255,255,0.12)\'; this.style.color=\'white\';" '
-                f'onmouseout="this.style.background=\'rgba(255,255,255,0.06)\'; this.style.color=\'#ccc\';">'
-                f'{btn_label}</a>',
-                unsafe_allow_html=True,
-            )
+            # Показываем прямой линк (если есть)
+            if vid_url:
+                st.markdown(
+                    f'<a href="{vid_url}" target="_blank" style="display:block; text-align:center; '
+                    f'padding:10px 12px; border-radius:8px; '
+                    f'background:rgba(255,255,255,0.08); color:#fff; text-decoration:none; '
+                    f'font-size:14px; margin-top:6px; border:1px solid rgba(255,255,255,0.15); '
+                    f'transition:all 0.15s;" '
+                    f'onmouseover="this.style.background=\'rgba(255,255,255,0.15)\';" '
+                    f'onmouseout="this.style.background=\'rgba(255,255,255,0.08)\';">'
+                    f'{btn_label}</a>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                # 3) Ничего нет → кнопка поиска на лету
+                if st.button("🔍 Найти и открыть видео", key=f"watch_find_{list_type}_{uid}",
+                             use_container_width=True):
+                    search_q = (f"{title} {year}" if m_type != "tv"
+                                else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}")
+                    with st.spinner("🔎 Ищем видео..."):
+                        found = search_watch_video(search_q, start_sec_for_link + 30)
+                    if found:
+                        st.session_state[watch_cache_key] = found
+                        st.rerun()
+                    else:
+                        st.error("❌ Не удалось найти видео. Попробуйте другой источник.")
 
 tab_search, tab_favs, tab_history, tab_ai, tab_url_dl, tab_title_dl, tab_vault = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке", "🔎 Скачать по названию", "💾 Мои видео"])
 
