@@ -1172,7 +1172,13 @@ def render_result_card(row, uid, list_type="search"):
 
             # ── Смотреть видео в браузере ──
             vid_search_q = f"{title} {year}" if m_type != "tv" else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}"
-            vid_search_url = f"https://www.youtube.com/results?search_query={vid_search_q.replace(' ', '+')}+фильм"
+            src_pref = st.session_state.get("source_pref", "all")
+            if src_pref == "youtube":
+                vid_search_url = f"https://www.youtube.com/results?search_query={vid_search_q.replace(' ', '+')}+фильм"
+                btn_label = "▶️ Смотреть на YouTube"
+            else:
+                vid_search_url = f"https://rutube.ru/search/video/?query={vid_search_q.replace(' ', '+')}+фильм"
+                btn_label = "📺 Смотреть на RuTube"
             st.markdown(
                 f'<a href="{vid_search_url}" target="_blank" style="display:block; text-align:center; '
                 f'padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.06); '
@@ -1180,7 +1186,7 @@ def render_result_card(row, uid, list_type="search"):
                 f'transition:all 0.15s;" '
                 f'onmouseover="this.style.background=\'rgba(255,255,255,0.12)\'; this.style.color=\'white\';" '
                 f'onmouseout="this.style.background=\'rgba(255,255,255,0.06)\'; this.style.color=\'#ccc\';">'
-                f'▶️ Смотреть на YouTube</a>',
+                f'{btn_label}</a>',
                 unsafe_allow_html=True,
             )
 
