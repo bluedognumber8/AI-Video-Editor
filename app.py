@@ -508,15 +508,14 @@ def manual_video_search(query, min_duration):
 
 
 def search_watch_video(query, min_duration, source_pref="all"):
-    """Search for a video URL respecting source preference.
-    source_pref='youtube' → YouTube only, 'rutube' → RuTube only, else → both (RuTube first)."""
-    sources_to_try = []
+    """Search for videos on YouTube/RuTube. Returns list of {source, id, label, duration} sorted by relevance."""
+    results = []
     if source_pref == "youtube":
         sources_to_try = ["youtube"]
     elif source_pref == "rutube":
         sources_to_try = ["rutube"]
     else:
-        sources_to_try = ["rutube", "youtube"]  # RuTube first for torrent/all
+        sources_to_try = ["rutube", "youtube"]
 
     for src in sources_to_try:
         if src == "youtube":
@@ -530,7 +529,11 @@ def search_watch_video(query, min_duration, source_pref="all"):
                         try:
                             v = json.loads(line)
                             if v.get("duration", 0) >= min_duration:
-                                return {"source": "youtube", "id": v.get("id"), "label": v.get("title")}
+                                results.append({
+                                    "source": "youtube", "id": v.get("id"),
+                                    "label": f"▶️ [YT] {v.get('title')} ({seconds_to_hms(v.get('duration', 0))})",
+                                    "duration": v.get("duration", 0),
+                                })
                         except (json.JSONDecodeError, KeyError):
                             continue
             except (subprocess.TimeoutExpired, OSError):
@@ -558,11 +561,15 @@ def search_watch_video(query, min_duration, source_pref="all"):
                         if video_url and not video_url.startswith("http"):
                             video_url = "https://rutube.ru" + video_url
                         if video_url:
-                            return {"source": "rutube", "id": video_url, "label": v.get("title")}
+                            results.append({
+                                "source": "rutube", "id": video_url,
+                                "label": f"📺 [RT] {v.get('title')} ({seconds_to_hms(dur)})",
+                                "duration": dur,
+                            })
             except (requests.RequestException, json.JSONDecodeError, OSError):
                 pass
 
-    return None
+    return results
 
 def build_sql_filters(min_rating, t_type, country_filter, genre_include, genre_exclude, specific_movie, params):
     sql = ""
@@ -1233,7 +1240,6 @@ def render_result_card(row, uid, list_type="search"):
             # ── Смотреть видео: прямой линк с таймкодом или поиск на лету ──
             start_sec_for_link = int(srt_to_seconds(start_srt))
             src_pref = st.session_state.get("source_pref", "all")
-            watch_cache_key = f"watch_vid_{list_type}_{uid}_{src_pref}"
 
             # 1) Привязанный источник → прямой линк
             vid_url = None
@@ -1247,18 +1253,7 @@ def render_result_card(row, uid, list_type="search"):
                     vid_url = f"{base_url}/?t={start_sec_for_link}&r=plwd"
                     btn_label = "📺 Смотреть на RuTube"
 
-            # 2) Найдено ранее (кэш поиска) → прямой линк
-            if not vid_url and watch_cache_key in st.session_state:
-                cached = st.session_state[watch_cache_key]
-                if cached["source"] == "youtube":
-                    vid_url = f"https://www.youtube.com/watch?v={cached['id']}&t={start_sec_for_link}s"
-                    btn_label = "▶️ Смотреть на YouTube"
-                elif cached["source"] == "rutube":
-                    base_url = cached["id"].rstrip("/")
-                    vid_url = f"{base_url}/?t={start_sec_for_link}&r=plwd"
-                    btn_label = "📺 Смотреть на RuTube"
-
-            # Показываем прямой линк (если есть)
+            # Показываем прямой линк (если есть привязанный источник)
             if vid_url:
                 st.markdown(
                     f'<a href="{vid_url}" target="_blank" style="display:block; text-align:center; '
@@ -1272,18 +1267,64 @@ def render_result_card(row, uid, list_type="search"):
                     unsafe_allow_html=True,
                 )
             else:
-                # 3) Ничего нет → кнопка поиска на лету (учитывает выбранный источник)
-                if st.button("🔍 Найти и открыть видео", key=f"watch_find_{list_type}_{uid}",
-                             use_container_width=True):
-                    search_q = (f"{title} {year}" if m_type != "tv"
-                                else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}")
-                    with st.spinner("🔎 Ищем видео..."):
-                        found = search_watch_video(search_q, start_sec_for_link + 30, source_pref=src_pref)
-                    if found:
-                        st.session_state[watch_cache_key] = found
-                        st.rerun()
+                # 3) Показываем список найденных видео (если есть) или кнопку поиска
+                watch_results_key = f"watch_results_{list_type}_{uid}_{src_pref}"
+                watch_selected_key = f"watch_sel_{list_type}_{uid}_{src_pref}"
+                saved_results = st.session_state.get(watch_results_key, [])
+
+                if saved_results:
+                    # Показываем selectbox с результатами
+                    sel_index = st.session_state.get(watch_selected_key, 0)
+                    if sel_index >= len(saved_results):
+                        sel_index = 0
+                    labels = [r["label"] for r in saved_results]
+                    chosen_label = st.selectbox("Найдено видео:", labels, index=sel_index,
+                                                 key=f"watch_sbox_{list_type}_{uid}_{src_pref}")
+                    chosen_idx = labels.index(chosen_label)
+                    st.session_state[watch_selected_key] = chosen_idx
+                    chosen = saved_results[chosen_idx]
+
+                    # Кнопка открыть выбранное
+                    if chosen["source"] == "youtube":
+                        chosen_url = f"https://www.youtube.com/watch?v={chosen['id']}&t={start_sec_for_link}s"
+                        chosen_btn = "▶️ Открыть на YouTube"
                     else:
-                        st.error("❌ Не удалось найти видео. Попробуйте другой источник.")
+                        base_url = chosen["id"].rstrip("/")
+                        chosen_url = f"{base_url}/?t={start_sec_for_link}&r=plwd"
+                        chosen_btn = "📺 Открыть на RuTube"
+
+                    st.markdown(
+                        f'<a href="{chosen_url}" target="_blank" style="display:block; text-align:center; '
+                        f'padding:10px 12px; border-radius:8px; '
+                        f'background:rgba(40,167,69,0.15); color:#28a745; text-decoration:none; '
+                        f'font-size:14px; margin-top:4px; border:1px solid rgba(40,167,69,0.3); '
+                        f'transition:all 0.15s;" '
+                        f'onmouseover="this.style.background=\'rgba(40,167,69,0.25)\';" '
+                        f'onmouseout="this.style.background=\'rgba(40,167,69,0.15)\';">'
+                        f'{chosen_btn}</a>',
+                        unsafe_allow_html=True,
+                    )
+
+                    if st.button("✕ Сбросить и найти заново", key=f"watch_reset_{list_type}_{uid}_{src_pref}",
+                                 use_container_width=True):
+                        del st.session_state[watch_results_key]
+                        if watch_selected_key in st.session_state:
+                            del st.session_state[watch_selected_key]
+                        st.rerun()
+                else:
+                    # Ничего нет → кнопка поиска
+                    if st.button("🔍 Найти и открыть видео", key=f"watch_find_{list_type}_{uid}",
+                                 use_container_width=True):
+                        search_q = (f"{title} {year}" if m_type != "tv"
+                                    else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}")
+                        with st.spinner("🔎 Ищем видео..."):
+                            all_found = search_watch_video(search_q, start_sec_for_link + 30, source_pref=src_pref)
+                        if all_found:
+                            st.session_state[watch_results_key] = all_found
+                            st.session_state[watch_selected_key] = 0
+                            st.rerun()
+                        else:
+                            st.error("❌ Не удалось найти видео. Попробуйте другой источник.")
 
 tab_search, tab_favs, tab_history, tab_ai, tab_url_dl, tab_title_dl, tab_vault = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке", "🔎 Скачать по названию", "💾 Мои видео"])
 
