@@ -1180,7 +1180,8 @@ def render_result_card(row, uid, list_type="search"):
                     vid_url = f"https://www.youtube.com/watch?v={s_id}&t={start_sec_for_link}s"
                     btn_label = "▶️ Смотреть на YouTube"
                 elif s_type == "rutube" and s_id:
-                    vid_url = f"{s_id}?t={start_sec_for_link}"
+                    base_url = s_id.rstrip("/")
+                    vid_url = f"{base_url}/?t={start_sec_for_link}&r=plwd"
                     btn_label = "📺 Смотреть на RuTube"
                 else:
                     vid_url = None
