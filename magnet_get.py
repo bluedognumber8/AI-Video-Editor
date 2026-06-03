@@ -331,18 +331,26 @@ QUALITY_PRESETS = {
     "360p":   "bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best",
 }
 
-def do_stream_download(video_url, start_time, duration_secs, output_path, platform_name, fmt="best"):
-    end_time = seconds_to_time(time_to_seconds(start_time) + duration_secs)
-    logger.info(f"Скачивание фрагмента с {platform_name.upper()}...")
+def do_stream_download(video_url, start_time, duration_secs, output_path, platform_name, fmt="best", full=False):
     fmt_str = QUALITY_PRESETS.get(fmt, QUALITY_PRESETS["best"])
-    logger.info(f"Качество: {fmt}")
+    logger.info(f"Скачивание с {platform_name.upper()}, качество: {fmt}")
 
-    download_cmd = [
-        "yt-dlp", "--quiet", "--progress",
-        "--download-sections", f"*{start_time}-{end_time}",
-        "-f", fmt_str,
-        "--force-keyframes-at-cuts", "-o", output_path, video_url
-    ]
+    if full or duration_secs == 0:
+        logger.info("📦 Режим полного видео (без обрезки)")
+        download_cmd = [
+            "yt-dlp", "--quiet", "--progress",
+            "-f", fmt_str,
+            "-o", output_path, video_url
+        ]
+    else:
+        end_time = seconds_to_time(time_to_seconds(start_time) + duration_secs)
+        logger.info(f"✂️ Обрезка: {start_time} → {end_time}")
+        download_cmd = [
+            "yt-dlp", "--quiet", "--progress",
+            "--download-sections", f"*{start_time}-{end_time}",
+            "-f", fmt_str,
+            "--force-keyframes-at-cuts", "-o", output_path, video_url
+        ]
 
     try:
         result = subprocess.run(download_cmd, timeout=120)
@@ -357,9 +365,9 @@ def do_stream_download(video_url, start_time, duration_secs, output_path, platfo
     return False
 
 
-def try_youtube(query, start_time, duration_secs, output_path):
+def try_youtube(query, start_time, duration_secs, output_path, full=False):
     logger.info(f"[YOUTUBE] Поиск: '{query}'")
-    req_dur = time_to_seconds(start_time) + duration_secs
+    req_dur = time_to_seconds(start_time) + duration_secs if not full else 0
 
     try:
         res = subprocess.run(
@@ -372,18 +380,18 @@ def try_youtube(query, start_time, duration_secs, output_path):
             if line.strip():
                 try: 
                     v = json.loads(line)
-                    if v.get("duration", 0) > req_dur:
+                    if full or v.get("duration", 0) > req_dur:
                         logger.info(f"  ВЫБРАНО ВИДЕО: {v.get('title', 'Без названия')}")
                         url = f"https://www.youtube.com/watch?v={v.get('id')}"
-                        return do_stream_download(url, start_time, duration_secs, output_path, "youtube")
+                        return do_stream_download(url, start_time, duration_secs, output_path, "youtube", full=full)
                 except json.JSONDecodeError: continue
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError): pass
     return False
 
 
-def try_rutube(query, start_time, duration_secs, output_path):
+def try_rutube(query, start_time, duration_secs, output_path, full=False):
     logger.info(f"[RUTUBE] Поиск: '{query}'")
-    req_dur = time_to_seconds(start_time) + duration_secs
+    req_dur = time_to_seconds(start_time) + duration_secs if not full else 0
 
     try:
         url = f"https://rutube.ru/api/search/video/?query={urllib.parse.quote(query)}"
@@ -394,12 +402,12 @@ def try_rutube(query, start_time, duration_secs, output_path):
             dur_str = str(v.get("duration", "0"))
             dur_sec = time_to_seconds(dur_str) if ":" in dur_str else int(dur_str)
 
-            if dur_sec == 0 or dur_sec > req_dur:
+            if full or (dur_sec == 0 or dur_sec > req_dur):
                 video_url = v.get("video_url")
                 if video_url:
                     if not video_url.startswith("http"): video_url = "https://rutube.ru" + video_url
                     logger.info(f"  ВЫБРАНО ВИДЕО: {v.get('title', 'Без названия')}")
-                    return do_stream_download(video_url, start_time, duration_secs, output_path, "rutube")
+                    return do_stream_download(video_url, start_time, duration_secs, output_path, "rutube", full=full)
     except (requests.RequestException, json.JSONDecodeError, OSError): pass
     return False
 
@@ -761,12 +769,13 @@ def main():
     parser.add_argument("--type", default="movie", choices=["movie", "tv"], help="Тип: movie или tv")
     parser.add_argument("--season", default="0", help="Номер сезона")
     parser.add_argument("--episode", default="0", help="Номер эпизода")
-    parser.add_argument("--start", required=True, help="Время начала (HH:MM:SS)")
-    parser.add_argument("--duration", required=True, type=int, help="Длительность (сек)")
+    parser.add_argument("--start", default="00:00:00", help="Время начала (HH:MM:SS)")
+    parser.add_argument("--duration", default=0, type=int, help="Длительность (сек). 0 = полное видео (--full)")
     parser.add_argument("--source", default="all", choices=["all", "youtube", "rutube", "torrent"], help="Источник")
     parser.add_argument("--force_source", default="", help="Принудительный источник (type:id)")
     parser.add_argument("--url", default="", help="Прямая ссылка на видео (YouTube/RuTube/VK). Включает режим скачивания по ссылке")
-    parser.add_argument("--format", default="best", choices=list(QUALITY_PRESETS.keys()), help="Качество видео (для --url)")
+    parser.add_argument("--format", default="best", choices=list(QUALITY_PRESETS.keys()), help="Качество видео")
+    parser.add_argument("--full", action="store_true", help="Скачать полное видео (без обрезки)")
     parser.add_argument("--output", default="", help="Путь к выходному файлу")
     args = parser.parse_args()
 
@@ -780,13 +789,14 @@ def main():
         logger.info(f"📥 Режим прямой ссылки. Платформа: {platform.upper()}")
         logger.info(f"   URL: {args.url}")
 
+        suffix = "_full" if args.full else "_clip"
         output_file = args.output or os.path.join(
             CONFIG["clip"]["output_folder"],
-            f"url_clip_{int(time.time())}.mp4"
+            f"url{suffix}_{int(time.time())}.mp4"
         )
         ensure_dir(os.path.dirname(output_file) or CONFIG["clip"]["output_folder"])
 
-        if do_stream_download(args.url, args.start, args.duration, output_file, platform, fmt=args.format):
+        if do_stream_download(args.url, args.start, args.duration, output_file, platform, fmt=args.format, full=args.full):
             logger.info(f"✅ УСПЕХ! Клип сохранен: {output_file}")
             sys.exit(0)
         else:
@@ -816,7 +826,8 @@ def main():
             sys.exit(1)
     else:
         name_part = f"{args.title}_S{target_season:02d}E{target_ep:02d}" if is_tv and target_season > 0 else (f"{args.title}_{args.year}" if int(args.year) > 0 else args.title)
-        output_file = os.path.join(CONFIG["clip"]["output_folder"], f"{sanitize_filename(name_part)}_clip.mp4")
+        suffix = "_full" if args.full else "_clip"
+        output_file = os.path.join(CONFIG["clip"]["output_folder"], f"{sanitize_filename(name_part)}{suffix}.mp4")
 
     # --- Принудительный источник ---
     if args.force_source:
@@ -825,7 +836,7 @@ def main():
         if len(parts) == 2:
             s_type, s_id = parts
             if s_type in ("youtube", "rutube"):
-                if do_stream_download(s_id, args.start, args.duration, output_file, s_type):
+                if do_stream_download(s_id, args.start, args.duration, output_file, s_type, full=args.full):
                     sys.exit(0)
             elif s_type == "torrent":
                 session, active_domain = ensure_rutracker_session()
@@ -842,8 +853,8 @@ def main():
         logger.info(f"\n{'='*40}\nИсточник: {source.upper()}\n{'='*40}")
 
         for query in queries:
-            if source == "youtube": success = try_youtube(query, args.start, args.duration, output_file)
-            elif source == "rutube": success = try_rutube(query, args.start, args.duration, output_file)
+            if source == "youtube": success = try_youtube(query, args.start, args.duration, output_file, full=args.full)
+            elif source == "rutube": success = try_rutube(query, args.start, args.duration, output_file, full=args.full)
             elif source == "torrent": success = try_torrent(query, args.start, args.duration, output_file, target_season, target_ep, is_tv)
             if success: break
 

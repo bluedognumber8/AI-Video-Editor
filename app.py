@@ -1135,7 +1135,7 @@ def render_result_card(row, uid, list_type="search"):
                     }
                     st.toast("📥 Загрузка начата! Смотрите в верхнюю панель.")
 
-tab_search, tab_favs, tab_history, tab_ai, tab_url_dl = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке"])
+tab_search, tab_favs, tab_history, tab_ai, tab_url_dl, tab_title_dl = st.tabs(["🔍 Результаты поиска", "⭐ Моё Избранное", "🕰 История поиска", "🧠 Лаборатория Промптов", "📥 Скачать по ссылке", "🔎 Скачать по названию"])
 
 with tab_search:
     if st.session_state.trigger_search:
@@ -1424,6 +1424,70 @@ with tab_url_dl:
             fpath = os.path.join(CLIPS_DIR, f)
             size_kb = os.path.getsize(fpath) / 1024
             st.markdown(f"- `{f}` ({size_kb:.0f} KB)")
+
+
+# ── Вкладка: Скачать по названию ──
+with tab_title_dl:
+    st.markdown("### 🔎 Скачать по названию")
+    st.caption("Найти и скачать полное видео по названию фильма/сериала с RuTube или через торренты (RuTracker).")
+
+    title_query = st.text_input(
+        "Название фильма или сериала",
+        placeholder="Интерстеллар, Matrix, 1+1...",
+        key="title_dl_query"
+    )
+
+    title_source = st.radio(
+        "Источник",
+        options=["rutube", "torrent"],
+        format_func=lambda x: {"rutube": "📺 RuTube", "torrent": "⚡ Торренты (RuTracker)"}.get(x, x),
+        horizontal=True,
+        key="title_dl_source"
+    )
+
+    title_quality = st.selectbox(
+        "🎬 Качество видео",
+        options=["best", "2160p", "1080p", "720p", "480p", "360p"],
+        index=0,
+        key="title_dl_quality",
+        help="best — максимальное доступное"
+    )
+
+    if st.button("🔍 Найти и скачать", type="primary", use_container_width=True, key="title_dl_btn",
+                 disabled=not bool(title_query and title_query.strip())):
+        if count_running_downloads() >= MAX_ACTIVE_DOWNLOADS:
+            st.error(f"❌ Максимум {MAX_ACTIVE_DOWNLOADS} загрузок.")
+        else:
+            task_id = f"titledl_{int(time.time())}"
+            sanitized_name = re.sub(r'[^a-zA-Z0-9а-яА-Я]', '_', title_query.strip())[:40]
+            expected_file = os.path.join(CLIPS_DIR, f"title_{sanitized_name}_{task_id[-6:]}.mp4")
+            log_file_path = os.path.join(LOGS_DIR, f"{task_id}_log.txt")
+
+            cmd = [
+                sys.executable, "-u", "magnet_get.py",
+                "--title", title_query.strip(),
+                "--source", title_source,
+                "--format", title_quality,
+                "--full",
+                "--output", expected_file
+            ]
+
+            log_file_handle = open(log_file_path, "w", encoding="utf-8")
+            _active_handles.append(log_file_handle)
+            process = subprocess.Popen(cmd, stdout=log_file_handle, stderr=subprocess.STDOUT,
+                                       text=True, env=os.environ.copy())
+            _active_processes.append(process)
+
+            st.session_state.active_downloads[task_id] = {
+                "title": f"🔎 {title_query.strip()[:50]}",
+                "quote": f"Источник: {title_source}",
+                "process": process,
+                "file_path": expected_file,
+                "log_file": log_file_path,
+                "_log_handle": log_file_handle,
+                "status": "running",
+            }
+            st.toast("📥 Поиск и загрузка начаты! Смотрите в верхнюю панель.")
 
 
 # Download status updates handled by auto_updating_fragment (run_every=2s)
