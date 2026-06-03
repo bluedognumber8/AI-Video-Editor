@@ -41,6 +41,33 @@ if not logger.handlers:
     handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
     logger.addHandler(handler)
 
+# Маппинг жанров: русское отображение → английское значение (как в БД)
+GENRE_MAP = {
+    "Любой": "Любой",
+    "Боевик": "Action",
+    "Комедия": "Comedy",
+    "Драма": "Drama",
+    "Фантастика": "Sci-Fi",
+    "Ужасы": "Horror",
+    "Романтика": "Romance",
+    "Криминал": "Crime",
+    "Анимация": "Animation",
+    "Приключения": "Adventure",
+    "Биография": "Biography",
+    "Семейный": "Family",
+    "Фэнтези": "Fantasy",
+    "Нуар": "Film-Noir",
+    "Исторический": "History",
+    "Музыка": "Music",
+    "Мюзикл": "Musical",
+    "Мистика": "Mystery",
+    "Спорт": "Sport",
+    "Триллер": "Thriller",
+    "Военный": "War",
+    "Вестерн": "Western",
+    "Неизвестно": "Unknown",
+}
+
 # Track Popen processes and file handles for cleanup on exit
 _active_processes = []
 _active_handles = []
@@ -461,7 +488,8 @@ def build_sql_filters(min_rating, t_type, country_filter, genre_filter, specific
     elif country_filter == "Зарубежное":
         sql += " AND (m.countries NOT LIKE '%RU%' AND m.countries NOT LIKE '%SU%' OR m.countries IS NULL)"
     if genre_filter != "Любой":
-        sql += " AND m.genres LIKE ?"; params.append(f"%{genre_filter}%")
+        genre_en = GENRE_MAP.get(genre_filter, genre_filter)
+        sql += " AND m.genres LIKE ?"; params.append(f"%{genre_en}%")
     return sql
 
 def _search_fts(query_text, limit, offset, min_rating, t_type, country_filter, genre_filter, specific_movie, exact_match):
@@ -698,7 +726,7 @@ with st.sidebar:
 
         st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change, disabled=filters_disabled)
         st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change, disabled=filters_disabled)
-        st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime", "Animation"], key="genre_filter", on_change=on_settings_change, disabled=filters_disabled)
+        st.selectbox("🎭 Жанр:", list(GENRE_MAP.keys()), key="genre_filter", on_change=on_settings_change, disabled=filters_disabled)
         st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change, disabled=filters_disabled)
 
     # ── Timing & source collapsible ──
