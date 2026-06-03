@@ -15,6 +15,10 @@ last_ai_model.json
 rutracker_cookies.*
 settings.json
 ui_settings.json
+.env
+
+# OpenCode internal state
+.omo/
 
 # Raw Data and Dev Archives
 dev_archive/
