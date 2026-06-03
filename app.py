@@ -77,6 +77,7 @@ CLIPS_DIR = 'clips'
 LOGS_DIR = 'logs'
 RESULTS_PER_PAGE = 10
 MAX_ACTIVE_DOWNLOADS = 5
+SETTINGS_FILE = 'ui_settings.json'
 
 os.makedirs(CLIPS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -90,14 +91,87 @@ def get_db():
 
 st.markdown("""
     <style>
+        /* ── Sticky search bar ── */
         .main .block-container > div[data-testid="stVerticalBlock"] > div:first-child {
             position: sticky; top: 2.875rem; background-color: var(--primary-background-color);
             z-index: 999; padding-top: 10px; padding-bottom: 10px;
-            border-bottom: 1px solid rgba(128,128,128, 0.2); margin-bottom: 15px;
+            border-bottom: 1px solid rgba(128,128,128,0.2); margin-bottom: 15px;
         }
         .stButton button { margin-top: 0px; }
         .clear-btn-col { padding-top: 28px; }
+
+        /* ── Source meta box ── */
         .source-meta-box { background: rgba(128,128,128,0.1); padding: 10px; border-radius: 8px; margin-bottom: 10px; font-size: 13px; }
+
+        /* ── Result cards ── */
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            border-radius: 12px !important;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+            border: 1px solid rgba(128,128,128,0.15) !important;
+            margin-bottom: 12px;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.3);
+            border-color: rgba(255,255,255,0.15) !important;
+        }
+
+        /* ── Tabs styling ── */
+        div[data-testid="stTabs"] button {
+            transition: all 0.15s ease;
+            border-radius: 8px 8px 0 0 !important;
+            font-weight: 500;
+        }
+        div[data-testid="stTabs"] button[aria-selected="true"] {
+            border-bottom: 2px solid #ff4b4b !important;
+        }
+
+        /* ── Sidebar min-width ── */
+        section[data-testid="stSidebar"] {
+            min-width: 320px !important;
+        }
+
+        /* ── Download manager badges ── */
+        .dl-badge {
+            display: inline-block; padding: 2px 10px; border-radius: 12px;
+            font-size: 12px; font-weight: 600; margin-left: 6px;
+        }
+        .dl-badge-running { background: rgba(255,193,7,0.2); color: #ffc107; }
+        .dl-badge-success { background: rgba(40,167,69,0.2); color: #28a745; }
+        .dl-badge-error   { background: rgba(220,53,69,0.2); color: #dc3545; }
+        .dl-badge-stopped { background: rgba(108,117,125,0.2); color: #6c757d; }
+
+        /* ── Animations ── */
+        @keyframes cardFadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            animation: cardFadeIn 0.35s ease-out both;
+        }
+        div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(1) { animation-delay: 0.00s; }
+        div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(2) { animation-delay: 0.04s; }
+        div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(3) { animation-delay: 0.08s; }
+        div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(4) { animation-delay: 0.12s; }
+        div[data-testid="stVerticalBlockBorderWrapper"]:nth-child(5) { animation-delay: 0.16s; }
+
+        /* ── Responsive ── */
+        @media (max-width: 768px) {
+            section[data-testid="stSidebar"] { min-width: 100% !important; }
+            div[data-testid="stVerticalBlockBorderWrapper"] { border-radius: 8px !important; }
+            .main .block-container > div[data-testid="stVerticalBlock"] > div:first-child {
+                padding-top: 6px; padding-bottom: 6px;
+            }
+        }
+
+        /* ── Reduced motion ── */
+        @media (prefers-reduced-motion: reduce) {
+            div[data-testid="stVerticalBlockBorderWrapper"],
+            div[data-testid="stVerticalBlockBorderWrapper"]:hover {
+                transition: none !important; animation: none !important;
+                transform: none !important;
+            }
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -178,12 +252,47 @@ def clear_search_history():
             conn.execute("DELETE FROM search_history")
     except Exception: pass
 
-# --- SESSION BASED SETTINGS (No global JSON saving) ---
+# --- SESSION BASED SETTINGS ---
 DEFAULT_SETTINGS = {
     "search_mode": "По словам (Быстро ⚡️)", "specific_movie": "Все фильмы",
     "t_type": "Все", "c_filter": "Все", "genre_filter": "Любой",
     "min_rating": 0.0, "pad_start": 30.0, "pad_end": 30.0, "source_pref": "all"
 }
+
+def save_settings():
+    """Save current filter settings to JSON file."""
+    settings = {
+        "search_mode": st.session_state.get("search_mode", DEFAULT_SETTINGS["search_mode"]),
+        "specific_movie": st.session_state.get("specific_movie", DEFAULT_SETTINGS["specific_movie"]),
+        "t_type": st.session_state.get("t_type", DEFAULT_SETTINGS["t_type"]),
+        "c_filter": st.session_state.get("c_filter", DEFAULT_SETTINGS["c_filter"]),
+        "genre_filter": st.session_state.get("genre_filter", DEFAULT_SETTINGS["genre_filter"]),
+        "min_rating": st.session_state.get("min_rating", DEFAULT_SETTINGS["min_rating"]),
+        "pad_start": st.session_state.get("pad_start", DEFAULT_SETTINGS["pad_start"]),
+        "pad_end": st.session_state.get("pad_end", DEFAULT_SETTINGS["pad_end"]),
+        "source_pref": st.session_state.get("source_pref", DEFAULT_SETTINGS["source_pref"]),
+        "exact_match_checkbox": st.session_state.get("exact_match_checkbox", False),
+    }
+    try:
+        with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"Failed to save settings: {e}")
+
+def load_settings():
+    """Load saved settings from JSON file into session_state before init."""
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            saved = json.load(f)
+        for key, val in saved.items():
+            if key in DEFAULT_SETTINGS:
+                st.session_state[key] = val
+    except Exception as e:
+        logger.warning(f"Failed to load settings: {e}")
+
+load_settings()  # Restore saved filters first
 
 if "settings_initialized" not in st.session_state:
     st.session_state.settings_initialized = True
@@ -207,11 +316,12 @@ def trigger_new_search():
 
 def on_settings_change():
     st.session_state.search_offset = 0
+    save_settings()
     if st.session_state.get("search_query_input", "").strip(): trigger_new_search()
     else: st.session_state.search_results = []
 
 def on_download_settings_change():
-    pass
+    save_settings()
 
 def sanitize_filename(name: str, max_length: int = 50) -> str:
     safe = re.sub(r'[^\w\s\-]', '', name, flags=re.UNICODE).strip().replace(" ", "_")
@@ -561,52 +671,74 @@ else:
     def auto_updating_fragment(func): return func
 
 with st.sidebar:
-    st.header("⚙️ Режим Поиска")
-    search_mode = st.radio("Как ищем?", ["По словам (Быстро ⚡️)", "ИИ-Агент (RAG Пайплайн 🤖)"], key="search_mode", on_change=on_settings_change)
+    # ── Search mode (always visible) ──
+    st.markdown("### ⚡ Режим Поиска")
+    st.radio("Как ищем?", ["По словам (Быстро ⚡️)", "ИИ-Агент (RAG Пайплайн 🤖)"], key="search_mode", on_change=on_settings_change)
 
-    st.markdown("---")
-    st.header("🎛 Фильтры")
-    
-    all_movies = ["Все фильмы"] + get_movie_titles()
-    current_movie_idx = all_movies.index(st.session_state.get("specific_movie", "Все фильмы")) if st.session_state.get("specific_movie") in all_movies else 0
+    # ── Filters collapsible ──
+    with st.expander("🎛️ Фильтры", expanded=True):
+        all_movies = ["Все фильмы"] + get_movie_titles()
+        current_movie_idx = all_movies.index(st.session_state.get("specific_movie", "Все фильмы")) if st.session_state.get("specific_movie") in all_movies else 0
 
-    # --- FIX: Callback for the specific movie clear button ---
-    def clear_movie_action():
-        st.session_state.specific_movie = "Все фильмы"
-        on_settings_change()
+        def clear_movie_action():
+            st.session_state.specific_movie = "Все фильмы"
+            on_settings_change()
 
-    c_mov1, c_mov2 = st.columns([5, 1])
-    with c_mov1:
-        st.selectbox("📌 В кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
-    with c_mov2:
-        st.markdown("<div class='clear-btn-col'></div>", unsafe_allow_html=True)
-        if st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы":
-            st.button("❌", key="clear_movie", help="Сбросить выбранный фильм", on_click=clear_movie_action)
+        c_mov1, c_mov2 = st.columns([5, 1])
+        with c_mov1:
+            st.selectbox("📌 В кино:", all_movies, index=current_movie_idx, key="specific_movie", on_change=on_settings_change)
+        with c_mov2:
+            st.markdown("<div class='clear-btn-col'></div>", unsafe_allow_html=True)
+            if st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы":
+                st.button("❌", key="clear_movie", help="Сбросить выбранный фильм", on_click=clear_movie_action)
 
-    filters_disabled = st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы"
-    if filters_disabled:
-        st.caption("*(Глобальные фильтры отключены, так как выбран конкретный фильм)*")
+        filters_disabled = st.session_state.get("specific_movie", "Все фильмы") != "Все фильмы"
+        if filters_disabled:
+            st.caption("*(Глобальные фильтры отключены, так как выбран конкретный фильм)*")
 
-    st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change, disabled=filters_disabled)
-    st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change, disabled=filters_disabled)
-    st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime", "Animation"], key="genre_filter", on_change=on_settings_change, disabled=filters_disabled)
-    st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change, disabled=filters_disabled)
+        st.radio("🎞 Тип медиа:", ["Все", "Фильмы", "Сериалы"], horizontal=True, key="t_type", on_change=on_settings_change, disabled=filters_disabled)
+        st.radio("🌍 Страна:", ["Все", "Наше (RU/SU)", "Зарубежное"], key="c_filter", on_change=on_settings_change, disabled=filters_disabled)
+        st.selectbox("🎭 Жанр:", ["Любой", "Comedy", "Drama", "Action", "Sci-Fi", "Horror", "Romance", "Crime", "Animation"], key="genre_filter", on_change=on_settings_change, disabled=filters_disabled)
+        st.slider("⭐️ Мин. рейтинг IMDb:", 0.0, 10.0, step=0.1, key="min_rating", on_change=on_settings_change, disabled=filters_disabled)
 
-    st.markdown("---")
-    st.header("✂️ Хронометраж")
-    pad_start = st.number_input("Секунд ДО фразы:", min_value=0.0, step=5.0, value=float(st.session_state.get("pad_start", 30.0)), key="pad_start", on_change=on_download_settings_change)
-    pad_end = st.number_input("Секунд ПОСЛЕ фразы:", min_value=0.0, step=5.0, value=float(st.session_state.get("pad_end", 30.0)), key="pad_end", on_change=on_download_settings_change)
-    source_pref = st.radio("🌐 Источник:", ["all", "youtube", "rutube", "torrent"], format_func=lambda x: {"all": "Везде (YT -> Tor)", "youtube": "Только YT", "rutube": "Только RuTube", "torrent": "Только Torrent (TorrServer ⚡️)"}[x], key="source_pref", on_change=on_download_settings_change)
+    # ── Timing & source collapsible ──
+    with st.expander("✂️ Хронометраж и источник", expanded=True):
+        pad_start = st.number_input("⏪ Секунд ДО фразы:", min_value=0.0, step=5.0, value=float(st.session_state.get("pad_start", 30.0)), key="pad_start", on_change=on_download_settings_change)
+        pad_end = st.number_input("⏩ Секунд ПОСЛЕ фразы:", min_value=0.0, step=5.0, value=float(st.session_state.get("pad_end", 30.0)), key="pad_end", on_change=on_download_settings_change)
+        source_pref = st.radio("🌐 Источник:", ["all", "youtube", "rutube", "torrent"], format_func=lambda x: {"all": "Везде (YT → Tor)", "youtube": "📺 Только YT", "rutube": "📺 Только RuTube", "torrent": "⚡ Только Torrent (TorrServer)"}[x], key="source_pref", on_change=on_download_settings_change)
 
 search_container = st.container()
 with search_container:
-    c_search, c_opt, c_btn = st.columns([5, 2, 1])
+    c_search, c_opt, c_btn = st.columns([5, 1, 1])
     with c_search:
-        st.text_input("🔍 Поиск фрагмента:", placeholder="Введите цитату (для точной фразы используйте кавычки \"\")", key="search_query_input", on_change=trigger_new_search, label_visibility="collapsed")
+        st.text_input(
+            "🔍 Поиск фрагмента:",
+            placeholder='Введите слово или фразу из фильма/сериала… (для точного поиска возьмите фразу в кавычки "вот так")',
+            key="search_query_input",
+            on_change=trigger_new_search,
+            label_visibility="collapsed",
+        )
     with c_opt:
-        st.checkbox("🎯 Точная фраза", key="exact_match_checkbox", on_change=trigger_new_search)
+        st.checkbox(
+            "🎯 Точная фраза",
+            key="exact_match_checkbox",
+            on_change=trigger_new_search,
+            help="Искать ТОЛЬКО введённые слова целиком, без словоформ, окончаний и склонений. Полезно для редких имён и терминов.",
+        )
     with c_btn:
-        if st.button("Найти 🚀", use_container_width=True, type="primary"): trigger_new_search()
+        if st.button("🚀 Найти", use_container_width=True, type="primary"):
+            trigger_new_search()
+
+def _status_badge(status):
+    """Return HTML for a colored status badge."""
+    colors = {
+        "running": ("running", "#ffc107"),
+        "success": ("success", "#28a745"),
+        "error": ("error", "#dc3545"),
+        "stopped": ("stopped", "#6c757d"),
+    }
+    cls, color = colors.get(status, ("error", "#dc3545"))
+    return f'<span class="dl-badge dl-badge-{cls}" style="background:{color}22; color:{color}">{status}</span>'
 
 @auto_updating_fragment
 def render_download_manager():
@@ -616,12 +748,13 @@ def render_download_manager():
     if not st.session_state.active_downloads:
         return
 
-    st.markdown(f"### 📥 Менеджер загрузок (Активных: {running_count})")
+    st.markdown(f"### 📥 Менеджер загрузок  <span style='font-size:14px; font-weight:400; color:#888;'>Активных: {running_count}</span>", unsafe_allow_html=True)
     
     c_btn1, c_btn2, c_btn3 = st.columns([2, 1, 1])
     with c_btn1:
         if running_count > 0:
-            st.info("🔄 Автообновление активно (идет скачивание...)")
+            bar = st.progress(0, text="🔄 Идёт скачивание...")
+            bar.progress(100, text="🔄 Идёт скачивание...")
         else:
             st.success("✅ Все задачи завершены")
     with c_btn2:
@@ -634,7 +767,7 @@ def render_download_manager():
             else:
                 subprocess.Popen(["xdg-open", abs_path])
     with c_btn3:
-        if st.button("🗑 Очистить завершенные", use_container_width=True):
+        if st.button("🗑️ Очистить завершённые", use_container_width=True, type="primary"):
             to_delete = [k for k, v in st.session_state.active_downloads.items() if v['status'] != 'running']
             for k in to_delete:
                 st.session_state.active_downloads.pop(k, None)
@@ -646,33 +779,20 @@ def render_download_manager():
         if task['status'] == 'running':
             proc = task.get('process')
             if proc and proc.poll() is None:
-                status_icon = "⏳"
                 try:
                     with open(task['log_file'], 'r', encoding='utf-8') as f:
-                        short_status = get_clean_status_from_log(f.readlines()[-15:])
+                        get_clean_status_from_log(f.readlines()[-15:])
                 except OSError:
-                    short_status = "В процессе..."
+                    pass
             else:
                 if os.path.exists(task['file_path']) and os.path.getsize(task['file_path']) > 1024:
                     task['status'] = 'success'
-                    status_icon = "✅"
-                    short_status = "Готово!"
                 else:
                     task['status'] = 'error'
-                    status_icon = "❌"
-                    short_status = "Ошибка"
-        elif task['status'] == 'success':
-            status_icon = "✅"
-            short_status = "Сохранено"
-        elif task['status'] == 'stopped':
-            status_icon = "⏹️"
-            short_status = "Остановлено"
-        else:
-            status_icon = "❌"
-            short_status = "Ошибка"
 
+        badge_html = _status_badge(task['status'])
         quote_preview = f" — «{sanitize_html_text(task.get('quote', '')[:30])}...»" if task.get('quote') else ""
-        accordion_label = f"{status_icon} {task['title']}{quote_preview} | {short_status}"
+        accordion_label = f"{task['title']}{quote_preview}  {badge_html}"
 
         with st.expander(accordion_label, expanded=(task['status'] == 'running')):
             
@@ -837,8 +957,8 @@ def render_result_card(row, uid, list_type="search"):
     with st.container(border=True):
         c_head1, c_head2 = st.columns([5, 1])
         with c_head1:
-            st.markdown(f"### {display_title} &nbsp;&nbsp; <a href='{imdb_link}' target='_blank' style='font-size:14px; text-decoration:none;'>🔗 IMDb</a>", unsafe_allow_html=True)
-            st.caption(f"⭐ {rating if rating else '?'} | 🎭 {genres} | 🌍 {countries}")
+            st.markdown(f"### {display_title} &nbsp;&nbsp; <a href='{imdb_link}' target='_blank' style='font-size:13px; text-decoration:none; opacity:0.7;'>🔗 IMDb</a>", unsafe_allow_html=True)
+            st.caption(f"⭐ {rating if rating else '?'} &nbsp;·&nbsp; 🎭 {genres} &nbsp;·&nbsp; 🌍 {countries}")
         with c_head2:
             is_fav = is_favorite(imdb_id, s_id)
             fav_icon = "❤️ В избранном" if is_fav else "🤍 Сохранить"
@@ -858,8 +978,19 @@ def render_result_card(row, uid, list_type="search"):
             set_source_offset(imdb_id, saved_source, st.session_state[state_key_offset])
 
         with c_body:
-            st.markdown(f"<div style='font-size: 18px; border-left: 4px solid #ff4b4b; padding-left: 15px; margin: 10px 0;'><i>«{text_html}»</i></div>", unsafe_allow_html=True)
-            st.markdown(f"<div style='color: #888; font-size: 14px;'>⏳ Таймкод: <b>{str(start_srt)[:8]}</b></div>", unsafe_allow_html=True)
+            st.markdown(
+                f"<div style='font-size: 19px; border-left: 4px solid #ff4b4b; padding: 8px 0 8px 18px; "
+                f"margin: 12px 0; line-height: 1.5; color: #e0e0e0;'>"
+                f"<i>«{text_html}»</i></div>",
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f"<div style='color: #999; font-size: 13px; display: flex; gap: 16px; margin-bottom: 8px;'>"
+                f"<span>⏳ <b>{str(start_srt)[:8]}</b></span>"
+                f"<span>📏 {seconds_to_hms(srt_to_seconds(end_srt) - srt_to_seconds(start_srt))}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
             with st.expander("💬 Показать полный диалог"):
                 context_items = get_surrounding_context(imdb_id, srt_to_seconds(start_srt), s_id, window_sec=45)
@@ -983,7 +1114,7 @@ with tab_search:
                 )
         
         if not st.session_state.search_results:
-            st.error("❌ Ничего не найдено")
+            st.warning("😕 Ничего не найдено. Попробуйте: изменить запрос, снять фильтры, переключить режим на «ИИ-Агент» или убрать галочку «Точная фраза».")
 
     if st.session_state.search_results:
         st.success(f"Показана страница {st.session_state.search_offset // RESULTS_PER_PAGE + 1}")
