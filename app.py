@@ -1232,7 +1232,8 @@ def render_result_card(row, uid, list_type="search"):
 
             # ── Смотреть видео: прямой линк с таймкодом или поиск на лету ──
             start_sec_for_link = int(srt_to_seconds(start_srt))
-            watch_cache_key = f"watch_vid_{list_type}_{uid}"
+            src_pref = st.session_state.get("source_pref", "all")
+            watch_cache_key = f"watch_vid_{list_type}_{uid}_{src_pref}"
 
             # 1) Привязанный источник → прямой линк
             vid_url = None
@@ -1276,7 +1277,6 @@ def render_result_card(row, uid, list_type="search"):
                              use_container_width=True):
                     search_q = (f"{title} {year}" if m_type != "tv"
                                 else f"{title} S{safe_int(season):02d}E{safe_int(ep):02d}")
-                    src_pref = st.session_state.get("source_pref", "all")
                     with st.spinner("🔎 Ищем видео..."):
                         found = search_watch_video(search_q, start_sec_for_link + 30, source_pref=src_pref)
                     if found:
